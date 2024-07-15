@@ -4,8 +4,8 @@ Created on Thu Jul 11 16:06:50 2024
 
 @author: Kwangho Baek baek0040@umn.edu
 """
+#%% Setup
 import os
-import random
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -23,12 +23,11 @@ else:
 pd.set_option('future.no_silent_downcasting', True)
 os.chdir(WPATH)
 
-random.seed(5723588)
-torch.manual_seed(5723588)
-np.random.seed(5723588)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
+#%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     '''for debugging
     surFile='survey'
@@ -132,108 +131,134 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]
     #dfSurvey[dfSurvey.drop(columns='duration').duplicated()]
     dfPath=dfPath.drop(columns=['ind','label_t','label_c','realDep','routes','elap']).rename(columns={"sid": "id"})
+    dfPath['aux']=dfPath['wk']+dfPath['nwk']
     return dfSurvey, dfPath
 
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'])
 
 
-
-def genChoicedf(dfSurvey,dfPath):
-    pass
-
-
-def genNeuralInputs(dfSurvey,dfPath):
-    dfMain=dfPath.loc[dfPath.tway==1,['id','match','nwk','wk','wt','ntiv','tiv','nTrans']]
-    dfSub=dfPath.loc[dfPath.tway==0,['id','match','nwk','wk','wt','ntiv','tiv','nTrans']]
+def genNeuralInputs(dfSurvey,dfPath,pathcols=['nwk','wk','wt','ntiv','tiv','nTrans'],dropcols=[]):
+    dfMain=dfPath.loc[dfPath.tway==1,np.append(['id','match'],pathcols)]
+    dfSub=dfPath.loc[dfPath.tway==0,np.append(['id','match'],pathcols)]
     if not np.all(dfMain.id.values==dfSub.id.values):
         raise Exception('organize dfPath or recheck the pairing steps')
     dfMain.iloc[:,2:]=dfMain.iloc[:,2:].to_numpy()-dfSub.iloc[:,2:].to_numpy()
     dfMain=pd.merge(dfSurvey,dfMain,on='id')
     chloc=np.where(dfMain.columns=='match')[0][0]
-    seg=torch.from_numpy(dfMain.iloc[:,1:chloc].to_numpy(dtype='float32'))
-    nume=torch.from_numpy(dfMain.iloc[:,(chloc+1):].to_numpy(dtype='float32'))
-    ch=torch.from_numpy(dfMain.iloc[:,chloc].to_numpy(dtype='float32'))
+    seg=torch.tensor(dfMain.iloc[:,1:chloc].to_numpy(),dtype=torch.float32).to(device)
+    nume=torch.tensor(dfMain.iloc[:,(chloc+1):].to_numpy(),dtype=torch.float32).to(device)
+    ch=torch.tensor(dfMain.iloc[:,chloc].to_numpy(),dtype=torch.float32).to(device)
     return seg, nume, ch
-    
+
+#segmentation_bases, numeric_attrs, y=genNeuralInputs(dfSurvey,dfPath)
+segmentation_bases, numeric_attrs, y=genNeuralInputs(dfSurvey,dfPath,collist=['aux','wt','iv','nTrans'])
+
+#%% Model Definition
+# Define the neural network model with latent classes
 class LatentClassNN(nn.Module):
-    def __init__(self, input_size, num_classes):
+    def __init__(self, input_size, hidden_size, num_classes):
         super(LatentClassNN, self).__init__()
-        self.fc1 = nn.Linear(input_size, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.fc3 = nn.Linear(128, 64)
-        self.fc4 = nn.Linear(64, num_classes)
+        self.layer1 = nn.Linear(input_size, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, 2*hidden_size)
+        self.layer3 = nn.Linear(2*hidden_size, hidden_size)
+        self.layero = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = F.softmax(self.fc4(x), dim=1)
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        x = F.relu(self.layer3(x))
+        x = F.softmax(self.layero(x), dim=1)
         return x
 
 class CombinedModel(nn.Module):
-    def __init__(self, segmentation_input_size, num_classes, numeric_attr_size):
+    def __init__(self, segmentation_input_size, num_classes, numeric_input_size):
         super(CombinedModel, self).__init__()
-        self.latent_nn = LatentClassNN(segmentation_input_size, num_classes)
-        self.beta = nn.Parameter(torch.randn(num_classes, numeric_attr_size + 1))  # Add 1 for intercepts
+        self.latent_class_nn = LatentClassNN(segmentation_input_size, 64, num_classes)
+        self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
 
     def forward(self, segmentation_bases, numeric_attrs):
-        latent_probs = self.latent_nn(segmentation_bases)
-        numeric_attrs_with_intercept = torch.cat(
-            [numeric_attrs, torch.ones(numeric_attrs.size(0), 1).to(device)], dim=1
-        )  # Add intercept term
-        weighted_numeric = torch.matmul(latent_probs, self.beta)
-        logit = torch.sum(weighted_numeric * numeric_attrs_with_intercept, dim=1)
-        return torch.sigmoid(logit)
+        latent_classes = self.latent_class_nn(segmentation_bases)
+        batch_size = numeric_attrs.size(0)
+        numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
+        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1)
+        # Separate intercept and non-intercept beta values
+        intercepts = beta_expanded[:, :, 0:1] #dim: nobs * nclass * 1
+        non_intercepts = beta_expanded[:, :, 1:] #dim: nobs * nclass * nnumcols
+        ## Apply negative absolute transformation only to non-intercept beta values
+        #non_intercepts = -torch.abs(non_intercepts)
+        # Concatenate intercepts and transformed non-intercepts
+        constrained_beta_expanded = torch.cat([intercepts, non_intercepts], dim=2) #dim 2 because concatenate 1 and nnumcols
+        # Compute logits for each class
+        logits = torch.bmm(numeric_attrs_with_intercept.unsqueeze(1), constrained_beta_expanded.permute(0, 2, 1)).squeeze(1)
+        # Aggregate class probabilities for the final output probability of y=1
+        final_probabilities = torch.sum(latent_classes * torch.sigmoid(logits), dim=1)
+        final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
+        return final_probabilities
 
-# Example usage
-# Assume segmentation_bases, numeric_attrs, and y are your dataset components
 
-segmentation_bases, numeric_attrs, y=genNeuralInputs(dfSurvey,dfPath)
-segmentation_bases = segmentation_bases.to(device)
-numeric_attrs = numeric_attrs.to(device)
-y = y.to(device)
-
-
-segmentation_input_size = segmentation_bases.shape[1]
-numeric_attr_size = numeric_attrs.shape[1]
-num_classes = 3  # You can choose the number of latent classes
-
-model = CombinedModel(segmentation_input_size, num_classes, numeric_attr_size).to(device)
-criterion = nn.BCELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-l2_lambda = 0.01  # L2 regularization strength
-
-losses = []  # List to store loss values
-
-# Training loop
-for epoch in range(300):  # number of epochs
-    model.train()
-    optimizer.zero_grad()
-    outputs = model(segmentation_bases, numeric_attrs)
-    loss = criterion(outputs, y)
-    
-    # L2 regularization
-    l2_reg = 0
-    for param in model.parameters():
-        l2_reg += torch.norm(param)
-    loss += l2_lambda * l2_reg
-
-    loss.backward()
-    optimizer.step()
-
-    losses.append(loss.item())  # Store the loss value
-
-    if (epoch + 1) % 10 == 0:
-        print(f'Epoch [{epoch+1}/100], Loss: {loss.item():.4f}')
+# Training function
+def train_model(segmentation_bases,nepoch=500,lrate=0.001,l2=0.1):
+    '''
+    nepoch=500
+    lrate=0.001
+    l2=0.01
+    '''
+    model = CombinedModel(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1]).to(device)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lrate)
+    l2_lambda = l2  # L2 regularization strength
+    losses = []  # List to store loss values
+    # Training loop
+    for epoch in range(nepoch):  # number of epochs
+        model.train()
+        optimizer.zero_grad()
+        outputs = model(segmentation_bases, numeric_attrs)
+        loss = criterion(outputs,y)  # Reshape target to match output
+        # L2 regularization only for nn part
+        l2_reg = 0
+        for name, param in model.named_parameters():
+            if 'latent_class_nn' in name:
+                l2_reg += torch.norm(param)
+        loss += l2_lambda * l2_reg
+        #gradient flow
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())  # Store the loss value
+        if (epoch + 1) % 25 == 0:
+            print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
+    outfin=outputs.detach().cpu().numpy()
+    outfin[outfin>0.99999]=0.99999
+    ynp=y.detach().cpu().numpy()
+    comp=pd.DataFrame([ynp,outfin]).T
+    comp['sqerr']=(comp.loc[:,0]-comp.loc[:,1])**2
+    LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
+    out0=ynp.mean()
+    LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
+    rhosq=1-LLM/LL0
+    print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
+    return model, losses, outputs
+#%% Model Run
+# Train models for both encodings
+num_classes = 2  # Define the number of latent classes
+modelout, lossesout, estimates = train_model(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1)
 
 # Plot the loss values
-plt.plot(range(1, len(losses) + 1), losses)
+plt.plot(range(1, len(lossesout) + 1), lossesout)
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.title('Training Loss')
 plt.show()
 
-# Inspect the estimated beta values
-beta_values = model.beta.detach().cpu().numpy()
-print("Estimated beta values (including intercepts):")
+# Inspect the estimated beta values for both models
+beta_values= modelout.beta.detach().clone().cpu().numpy()
+print("Estimated beta values:")
 print(beta_values)
+
+
+
+
+
+
+
+def genChoicedf(dfSurvey,dfPath):
+    pass
