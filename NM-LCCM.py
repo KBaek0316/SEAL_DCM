@@ -249,53 +249,58 @@ def train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.001,l2=0.1):
     print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
     return model, losses, outputs, rhosq
 #%% Model Tuning
-# Train models for both encodings
-num_classes = 2  # Define the number of latent classes
-dfTune=pd.read_csv('tuning.csv')
-for row in dfTune.itertuples():
-    if not np.isnan(row.rho0):
-        continue
-    print(row)
-    i=0
-    rhos=[]
-    membership=0
-    desired=0
-    while i<100:
-        i+=1
-        modelout, lossesout, estimates,rho = train_model(segmentation_bases,
-                                                         nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
-        beta_values= modelout.beta.detach().clone().cpu().numpy()
-        rhos.append(rho)
-        print(beta_values)
-        with torch.no_grad():
-            _, member_prop = modelout(segmentation_bases, numeric_attrs)
-        member_prop=pd.DataFrame(member_prop.detach().cpu().numpy().astype(float))
-        member_prop['assigned']=member_prop.idxmax(axis=1)+1
-        member_prop.columns=np.append(np.char.add('class',((np.arange(num_classes)+1).astype(str))),'assigned')
-        assignedmean=member_prop.assigned.mean()
-        if assignedmean>1.1 and assignedmean<1.9:
-            membership+=1
-            if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.02) and rho>0.3:
-                desired+=1
-    rhos=np.array(rhos)
-    dfTune.loc[row.Index,'rho0']=sum(rhos>0)
-    dfTune.loc[row.Index,'rho4']=sum(rhos>0.4)
-    dfTune.loc[row.Index,'rhopmean']=rhos[rhos>0].mean()
-    dfTune.loc[row.Index,'membership']=membership
-    dfTune.loc[row.Index,'desired']=desired
-    dfTune.to_csv('tuning.csv',index=False)
+def mTuning(niter,nclass):
+    num_classes = nclass  # Define the number of latent classes
+    dfTune=pd.read_csv('tuning.csv')
+    for row in dfTune.itertuples():
+        if not np.isnan(row.rho0):
+            continue
+        print(row)
+        i=0
+        rhos=[]
+        membership=0
+        desired=0
+        while i<niter:
+            i+=1
+            modelout, lossesout, estimates,rho = train_model(segmentation_bases,
+                                                             nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
+            beta_values= modelout.beta.detach().clone().cpu().numpy()
+            rhos.append(rho)
+            print(beta_values)
+            with torch.no_grad():
+                _, member_prop = modelout(segmentation_bases, numeric_attrs)
+            member_prop=pd.DataFrame(member_prop.detach().cpu().numpy().astype(float))
+            member_prop['assigned']=member_prop.idxmax(axis=1)+1
+            member_prop.columns=np.append(np.char.add('class',((np.arange(num_classes)+1).astype(str))),'assigned')
+            assignedmean=member_prop.assigned.mean()
+            if assignedmean>1.1 and assignedmean<1.9:
+                membership+=1
+                if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.02) and rho>0.3:
+                    desired+=1
+        rhos=np.array(rhos)
+        dfTune.loc[row.Index,'rho0']=sum(rhos>0)
+        dfTune.loc[row.Index,'rho4']=sum(rhos>0.4)
+        dfTune.loc[row.Index,'rhomax']=rhos.max()
+        dfTune.loc[row.Index,'rhopmean']=rhos[rhos>0].mean()
+        dfTune.loc[row.Index,'membership']=membership
+        dfTune.loc[row.Index,'desired']=desired
+        dfTune.to_csv('tuning.csv',index=False)
+    return None
+#mTuning(100,2)
 
-
-
-''' test
+#%% Getting Results
+modelout=0
+try:
+    del modelout
+except:
+    pass
 while True:
+    num_classes=2
     modelout, lossesout, estimates,rho = train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.002,l2=0.0)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
     print("Estimated beta values: ['ASC','aux','wt','iv','nTrans']")
     print(beta_values)
-    rhos.append(rho)
-    i+=1
-    if rho>0.1: #beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.01) and rho>0.3:
+    if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.01) and rho>0.3:
         print('good')
         # Plot the loss values
         plt.plot(range(1, len(lossesout) + 1), lossesout)
@@ -312,8 +317,8 @@ while True:
         print(member_prop.assigned.mean())
         dataOut=pd.concat([dfIn,member_prop],axis=1)
         break
-del modelout
-'''
+
+
 
 
 
