@@ -83,7 +83,9 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     dfSurvey.loc[dfSurvey.purpose=='HB','purpose']='HBO' #there is one instance whose O and D are both Home
     #move on to the path preprocessing; paths retrieved from the repository SchBasedSPwithTE_Pandas
     dfPathRaw=pd.read_csv(pathFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
+    print('Among '+str(len(dfPathRaw.sid.unique())-2)+' survey respondents examined,')
     dfPath=dfPathRaw.drop(columns=['detail','cost','line','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
+    print(str(len(dfPath.sid.unique()))+' respondents have at least one path identified from V-SBSP')
     dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
     dfPath['tway']=0
     dfPath['ntiv']=dfPath['iv']-dfPath['tiv']
@@ -126,10 +128,10 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     pathfilter['compDiff']=pathfilter.maxt-pathfilter.mint
     pathfilter['compProp']=pathfilter.maxt/pathfilter.mint
     pathfilter2=pathfilter.loc[(pathfilter.compDiff<10) | ((pathfilter.compProp<1.5)) ]
-    len(pathfilter2)/len(pathfilter)
-    dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:]
+    dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:].reset_index(drop=True)
     dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]
-    #dfSurvey[dfSurvey.drop(columns='duration').duplicated()]
+    len(pathfilter2)/len(pathfilter)
+    print(f'{len(dfPath.sid.unique())} paths paired ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     dfPath=dfPath.drop(columns=['ind','label_t','label_c','realDep','routes','elap']).rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
     return dfSurvey, dfPath
@@ -137,21 +139,30 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'])
 
 
-def genNeuralInputs(dfSurvey,dfPath,pathcols=['nwk','wk','wt','ntiv','tiv','nTrans'],dropcols=[]):
+def genTensors(dfSurvey,dfPath,pathcols=['nwk','wk','wt','ntiv','tiv','nTrans'],dropcols=[],stdcols=[]):
+    #dfMain: Tway paths #dfSub: nonTway paths
     dfMain=dfPath.loc[dfPath.tway==1,np.append(['id','match'],pathcols)]
     dfSub=dfPath.loc[dfPath.tway==0,np.append(['id','match'],pathcols)]
     if not np.all(dfMain.id.values==dfSub.id.values):
         raise Exception('organize dfPath or recheck the pairing steps')
     dfMain.iloc[:,2:]=dfMain.iloc[:,2:].to_numpy()-dfSub.iloc[:,2:].to_numpy()
-    dfMain=pd.merge(dfSurvey,dfMain,on='id')
+    #final survey preprocessing with standardization
+    scaler=StandardScaler()
+    stdized=pd.DataFrame(scaler.fit_transform(dfSurvey[stdcols]),columns=stdcols)
+    dfSurvey2=dfSurvey.drop(columns=dropcols).copy()
+    dfSurvey2.update(stdized)
+    dfMain=pd.merge(dfSurvey.drop(columns=dropcols),dfMain,on='id')
     chloc=np.where(dfMain.columns=='match')[0][0]
     seg=torch.tensor(dfMain.iloc[:,1:chloc].to_numpy(),dtype=torch.float32).to(device)
     nume=torch.tensor(dfMain.iloc[:,(chloc+1):].to_numpy(),dtype=torch.float32).to(device)
     ch=torch.tensor(dfMain.iloc[:,chloc].to_numpy(),dtype=torch.float32).to(device)
-    return seg, nume, ch
+    return seg, nume, ch, dfMain
 
-#segmentation_bases, numeric_attrs, y=genNeuralInputs(dfSurvey,dfPath)
-segmentation_bases, numeric_attrs, y=genNeuralInputs(dfSurvey,dfPath,collist=['aux','wt','iv','nTrans'])
+#segmentation_bases, numeric_attrs, y, dfIn=genNeuralInputs(dfSurvey,dfPath) #full model
+segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
+                                                     pathcols=['aux','wt','iv','nTrans'],
+                                                     dropcols=['duration'],
+                                                     stdcols=['age', 'income', 'duration'])
 
 #%% Model Definition
 # Define the neural network model with latent classes
@@ -171,9 +182,9 @@ class LatentClassNN(nn.Module):
         return x
 
 class CombinedModel(nn.Module):
-    def __init__(self, segmentation_input_size, num_classes, numeric_input_size):
+    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes):
         super(CombinedModel, self).__init__()
-        self.latent_class_nn = LatentClassNN(segmentation_input_size, 64, num_classes)
+        self.latent_class_nn = LatentClassNN(segmentation_input_size, nnodes, num_classes)
         self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
 
     def forward(self, segmentation_bases, numeric_attrs):
@@ -184,8 +195,9 @@ class CombinedModel(nn.Module):
         # Separate intercept and non-intercept beta values
         intercepts = beta_expanded[:, :, 0:1] #dim: nobs * nclass * 1
         non_intercepts = beta_expanded[:, :, 1:] #dim: nobs * nclass * nnumcols
-        ## Apply negative absolute transformation only to non-intercept beta values
-        #non_intercepts = -torch.abs(non_intercepts)
+        # Apply negative ReLU to enforce non-positive betas
+        non_intercepts = -torch.nn.functional.relu(non_intercepts)
+        #    non_intercepts = -torch.abs(non_intercepts) #deprecated
         # Concatenate intercepts and transformed non-intercepts
         constrained_beta_expanded = torch.cat([intercepts, non_intercepts], dim=2) #dim 2 because concatenate 1 and nnumcols
         # Compute logits for each class
@@ -195,15 +207,14 @@ class CombinedModel(nn.Module):
         final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
         return final_probabilities
 
-
 # Training function
-def train_model(segmentation_bases,nepoch=500,lrate=0.001,l2=0.1):
+def train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.001,l2=0.1):
     '''
     nepoch=500
     lrate=0.001
     l2=0.01
     '''
-    model = CombinedModel(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1]).to(device)
+    model = CombinedModel(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1],nnodes).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lrate)
     l2_lambda = l2  # L2 regularization strength
@@ -224,23 +235,150 @@ def train_model(segmentation_bases,nepoch=500,lrate=0.001,l2=0.1):
         loss.backward()
         optimizer.step()
         losses.append(loss.item())  # Store the loss value
-        if (epoch + 1) % 25 == 0:
+        if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
     outfin=outputs.detach().cpu().numpy()
-    outfin[outfin>0.99999]=0.99999
+    #outfin=np.clip(outfin,1e-7, 1 - 1e-7)
     ynp=y.detach().cpu().numpy()
-    comp=pd.DataFrame([ynp,outfin]).T
-    comp['sqerr']=(comp.loc[:,0]-comp.loc[:,1])**2
     LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
-    out0=ynp.mean()
+    #out0=ynp.mean()
+    out0=1/2
+    LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
+    rhosq=1-LLM/LL0
+    print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
+    return model, losses, outputs, rhosq
+#%% Model Tuning
+# Train models for both encodings
+num_classes = 2  # Define the number of latent classes
+i=0
+rhos=[]
+while True:
+    modelout, lossesout, estimates,rho = train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.002,l2=0.005)
+    beta_values= modelout.beta.detach().clone().cpu().numpy()
+    print("Estimated beta values: ['ASC','aux','wt','iv','nTrans']")
+    print(beta_values)
+    rhos.append(rho)
+    i+=1
+    if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0) and rho>0.3:
+        print('good')
+        # Plot the loss values
+        plt.plot(range(1, len(lossesout) + 1), lossesout)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training Loss')
+        plt.show()
+        break
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#%% Deterministic Model
+raise Exception('experimental')
+class CombinedModelD(nn.Module):
+    def __init__(self, segmentation_input_size, num_classes, numeric_input_size):
+        super(CombinedModelD, self).__init__()
+        self.latent_class_nn = LatentClassNN(segmentation_input_size, 32, num_classes)
+        self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
+    def forward(self, segmentation_bases, numeric_attrs):
+        latent_classes = self.latent_class_nn(segmentation_bases)
+        batch_size = numeric_attrs.size(0)
+        numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
+       # Determine the most probable latent class for each observation
+        most_probable_classes = torch.argmax(latent_classes, dim=1)
+        # Create a tensor to hold the logits
+        logits = torch.zeros(batch_size).to(device)
+        # Compute logits for the most probable class for each observation
+        for i in range(batch_size):
+            class_index = most_probable_classes[i]
+            beta_values = self.beta[class_index]
+            # Separate intercept and non-intercept beta values
+            intercept = beta_values[0]
+            non_intercepts = beta_values[1:]
+            # Apply transformation to enforce non-positive non-intercept beta values
+            non_intercepts = -torch.nn.functional.relu(non_intercepts)
+            # Compute the logit for the current observation
+            logit = intercept + torch.dot(non_intercepts, numeric_attrs_with_intercept[i, 1:])
+            logits[i] = logit
+        # Aggregate class probabilities for the final output probability of y=1
+        final_probabilities = torch.sigmoid(logits)
+        # Clamp the probabilities to avoid log(0) issues
+        final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7)
+        return final_probabilities
+# Training function
+def train_modelD(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1):
+    '''
+    nepoch=500
+    lrate=0.001
+    l2=0.01
+    '''
+    model = CombinedModelD(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1]).to(device)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lrate)
+    l2_lambda = l2  # L2 regularization strength
+    losses = []  # List to store loss values
+    # Training loop
+    for epoch in range(nepoch):  # number of epochs
+        model.train()
+        optimizer.zero_grad()
+        outputs = model(segmentation_bases, numeric_attrs)
+        loss = criterion(outputs,y)  # Reshape target to match output
+        # L2 regularization only for nn part
+        l2_reg = 0
+        for name, param in model.named_parameters():
+            if 'latent_class_nn' in name:
+                l2_reg += torch.norm(param)
+        loss += l2_lambda * l2_reg
+        #gradient flow
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())  # Store the loss value
+        if (epoch + 1) % 50 == 0:
+            print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
+    outfin=outputs.detach().cpu().numpy()
+    ynp=np.clip(y.detach().cpu().numpy(),1e-7, 1 - 1e-7)
+    #comp=pd.DataFrame([ynp,outfin]).T
+    #comp['sqerr']=(comp.loc[:,0]-comp.loc[:,1])**2
+    LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
+    #out0=ynp.mean()
+    out0=1/2
     LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
     rhosq=1-LLM/LL0
     print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
     return model, losses, outputs
-#%% Model Run
+
 # Train models for both encodings
 num_classes = 2  # Define the number of latent classes
-modelout, lossesout, estimates = train_model(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1)
+modelout, lossesout, estimates = train_modelD(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1)
 
 # Plot the loss values
 plt.plot(range(1, len(lossesout) + 1), lossesout)
@@ -254,11 +392,7 @@ beta_values= modelout.beta.detach().clone().cpu().numpy()
 print("Estimated beta values:")
 print(beta_values)
 
-
-
-
-
-
+#%%
 
 def genChoicedf(dfSurvey,dfPath):
     pass
