@@ -8,6 +8,7 @@ Created on Thu Jul 11 16:06:50 2024
 import os
 import pandas as pd
 import numpy as np
+from numpy import linalg as LA
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import KNNImputer
 import matplotlib.pyplot as plt
@@ -209,13 +210,13 @@ class CombinedModel(nn.Module):
         return final_probabilities, latent_classes
 
 # Training function
-def train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.001,l2=0.1):
+def train_model(segmentation_bases,nclass=2,nnodes=128,nepoch=500,lrate=0.001,l2=0.1):
     '''
     nepoch=500
     lrate=0.001
     l2=0.01
     '''
-    model = CombinedModel(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1],nnodes).to(device)
+    model = CombinedModel(segmentation_bases.shape[1], nclass, numeric_attrs.shape[1],nnodes).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lrate)
     l2_lambda = l2  # L2 regularization strength
@@ -249,20 +250,20 @@ def train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.001,l2=0.1):
     print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
     return model, losses, outputs, rhosq
 #%% Model Tuning
-def mTuning(niter,nclass):
-    num_classes = nclass  # Define the number of latent classes
-    dfTune=pd.read_csv('tuning.csv')
+def mTuning(filename):
+    dfTune=pd.read_csv(filename)
     for row in dfTune.itertuples():
         if not np.isnan(row.rho0):
             continue
         print(row)
+        num_classes = row.nclass
         i=0
         rhos=[]
         membership=0
         desired=0
-        while i<niter:
+        while i<row.niter:
             i+=1
-            modelout, lossesout, estimates,rho = train_model(segmentation_bases,
+            modelout, lossesout, estimates,rho = train_model(segmentation_bases,nclass=num_classes,
                                                              nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
             beta_values= modelout.beta.detach().clone().cpu().numpy()
             rhos.append(rho)
@@ -286,27 +287,38 @@ def mTuning(niter,nclass):
         dfTune.loc[row.Index,'desired']=desired
         dfTune.to_csv('tuning.csv',index=False)
     return None
-#mTuning(100,2)
+#mTuning('tuning.csv')
 
 #%% Getting Results
-modelout=0
+def desiredModel(betas,rsq,interDiff=0.3,batanonsg=0.03,rsqcut=0.4):
+    adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
+    intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
+    betatest=all(betas[:,1:].flatten()<batanonsg*adjL2norm)
+    rhotest=rsq>rsqcut
+    testResult=intercepttest*betatest*rhotest
+    print(f'intercept: {intercepttest}, coeffs: {betatest}, rho: {rhotest}')
+    return testResult
+
+modelout=0 #initialize
+num_classes=2
+desired=0
+i=1
+
 try:
     del modelout
 except:
     pass
-while True:
-    num_classes=2
-    modelout, lossesout, estimates,rho = train_model(segmentation_bases,nnodes=128,nepoch=500,lrate=0.002,l2=0.0)
+while desired<30:
+    modelout, lossesout, estimates,rho = train_model(segmentation_bases,nclass=num_classes,nnodes=64,nepoch=500,lrate=0.05,l2=0.001)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
-    print("Estimated beta values: ['ASC','aux','wt','iv','nTrans']")
+    print(f"Estimated beta values: ['ASC','aux','wt','iv','nTrans'] for the {num_classes} classes as rows")
     print(beta_values)
-    if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.01) and rho>0.3:
-        print('good')
+    if  desiredModel(beta_values,rho):
         # Plot the loss values
         plt.plot(range(1, len(lossesout) + 1), lossesout)
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
-        plt.title('Training Loss')
+        plt.title(f'Training Loss for model {i}')
         plt.show()
         modelout.eval()
         with torch.no_grad():
@@ -314,45 +326,29 @@ while True:
         member_prop=pd.DataFrame(member_prop.detach().cpu().numpy().astype(float))
         member_prop['assigned']=member_prop.idxmax(axis=1)+1
         member_prop.columns=np.append(np.char.add('class',((np.arange(num_classes)+1).astype(str))),'assigned')
-        print(member_prop.assigned.mean())
-        dataOut=pd.concat([dfIn,member_prop],axis=1)
-        break
+        assignedmean=member_prop.assigned.mean()
+        if assignedmean>1.1 and assignedmean<1.9:
+            LA.norm(beta_values.flatten()[beta_values.flatten()<beta_values.max()]) # for inspection
+            desired+=1
+            print('%%% Desired model found! %%%')
+            if beta_values[0,0]<beta_values[1,0]: #Make class 1 as transitway likely class
+                beta_values=beta_values[[1,0],:] #swap rows
+                member_prop['assigned']=(3-member_prop.assigned) #invert 1 and 2
+            if desired==1:
+                pass #gen df format
+            pass #rho, coeffs, mem assignments: 1+10+N rows
+        #dataOut=pd.concat([dfIn,member_prop],axis=1)
+    i+=1
+
+
+#%%
+def genChoicedf(dfSurvey,dfPath):
+    pass
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#%% Deterministic Model
-raise Exception('experimental')
+'''deprecated
 class CombinedModelD(nn.Module):
     def __init__(self, segmentation_input_size, num_classes, numeric_input_size):
         super(CombinedModelD, self).__init__()
@@ -385,11 +381,6 @@ class CombinedModelD(nn.Module):
         return final_probabilities
 # Training function
 def train_modelD(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1):
-    '''
-    nepoch=500
-    lrate=0.001
-    l2=0.01
-    '''
     model = CombinedModelD(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1]).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lrate)
@@ -440,8 +431,4 @@ plt.show()
 beta_values= modelout.beta.detach().clone().cpu().numpy()
 print("Estimated beta values:")
 print(beta_values)
-
-#%%
-
-def genChoicedf(dfSurvey,dfPath):
-    pass
+'''
