@@ -77,8 +77,8 @@ version,step,field,orilevel,newlevel
 2016,pre,egress,Scooter / Motorcycle,bike
 2016,pre,egress,Skateboard,walk
 2016,pre,egress,Dial-a-Ride,drive
-2022,post,season,Fall/Spring,fallspring
-2022,post,season,Summer,summer
+2022,post,summer,Fall/Spring,0
+2022,post,summer,Summer,1
 2022,post,purO,Your HOME / place I am staying,Home
 2022,post,purO,College / University (students only),Ed
 2022,post,purO,Work,W

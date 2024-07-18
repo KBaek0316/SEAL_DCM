@@ -29,6 +29,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
 pathattrstobeused=['aux','wt','iv','nTrans'] #available: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'iv'
+
 #%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     '''for debugging
@@ -50,7 +51,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
                                      'hh_member_travel','origin_transport','destin_transport','trip_in_oppo_dir',
                                      'oppo_dir_trip_time','gender_male', 'gender_female','race_white','resident_visitor',
                                      'work_location','student_status','english_ability', 'your_age','income', 'have_disability']]
-            dfSurvey.columns=['id','season','dayofweek','purO','purD','plan','realtime','candrive','cdhvusdveh',
+            dfSurvey.columns=['id','summer','dayofweek','purO','purD','plan','realtime','candrive','cdhvusdveh',
                               'HHcomp','access','egress','oppo','oppotime','male','female','white','visitor','worktype','stu',
                               'engflu','age','income','disability']
     #use keygen to generate dfConv.csv
@@ -114,7 +115,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     dfSurvey['duration']=dfSurvey.oppotime-dfSurvey.realDep/60
     dfSurvey=dfSurvey.drop_duplicates('id').drop(columns=['purO','purD','candrive','cdhvusdveh','oppotime','sid','realDep']).reset_index(drop=True)
     print(dfSurvey.isnull().sum())
-    catcols=['season','dayofweek','plan','access','egress','worktype','stu','choicerider','purpose']
+    catcols=['dayofweek','plan','access','egress','worktype','stu','choicerider','purpose']
     enc=OneHotEncoder(sparse_output=False)
     dfOnehot=pd.DataFrame( enc.fit_transform(dfSurvey[catcols]),columns=enc.get_feature_names_out())
     dfSurvey=pd.concat([dfSurvey.drop(columns=catcols),dfOnehot],axis=1,ignore_index=False)
@@ -136,6 +137,8 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     print(f'{len(dfPath.sid.unique())} paths paired ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     dfPath=dfPath.drop(columns=['ind','label_t','label_c','realDep','routes','elap']).rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
+    dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
+    dfMNL.to_csv('dfMNL.csv',index=False)
     return dfSurvey, dfPath
 
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'])
@@ -331,6 +334,7 @@ while desired<100:
         member_prop['assigned']=member_prop.idxmax(axis=1)+1
         member_prop.columns=np.append(np.char.add('class',((np.arange(num_classes)+1).astype(str))),'assigned')
         assignedmean=member_prop.assigned.mean()
+        assignedmean
         if assignedmean>1.1 and assignedmean<1.9:
             LA.norm(beta_values.flatten()[beta_values.flatten()<beta_values.max()]) # for inspection
             desired+=1
@@ -348,6 +352,7 @@ while desired<100:
             dataOut.to_csv('modelout.csv')
     i+=1
 print('Finished')
+dfIn.match.to_clipboard(index=False,header=False)
 
 #%%
 def genChoicedf(dfSurvey,dfPath):
