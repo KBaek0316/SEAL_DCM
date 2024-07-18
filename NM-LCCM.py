@@ -28,6 +28,7 @@ os.chdir(WPATH)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
+pathattrstobeused=['aux','wt','iv','nTrans'] #available: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'iv'
 #%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     '''for debugging
@@ -140,7 +141,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'])
 
 
-def genTensors(dfSurvey,dfPath,pathcols=['nwk','wk','wt','ntiv','tiv','nTrans'],dropcols=[],stdcols=[]):
+def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
     #dfMain: Tway paths #dfSub: nonTway paths
     dfMain=dfPath.loc[dfPath.tway==1,np.append(['id','match'],pathcols)]
     dfSub=dfPath.loc[dfPath.tway==0,np.append(['id','match'],pathcols)]
@@ -160,9 +161,8 @@ def genTensors(dfSurvey,dfPath,pathcols=['nwk','wk','wt','ntiv','tiv','nTrans'],
     ch=torch.tensor(dfMain.iloc[:,chloc].to_numpy(),dtype=torch.float32).to(device)
     return seg, nume, ch, dfMain
 
-#segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath) #full model
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
-                                                     pathcols=['aux','wt','iv','nTrans'],
+                                                     pathcols=pathattrstobeused,
                                                      dropcols=['duration'],
                                                      stdcols=['age', 'income', 'duration'])
 
@@ -243,8 +243,8 @@ def train_model(segmentation_bases,nclass=2,nnodes=128,nepoch=500,lrate=0.001,l2
     #outfin=np.clip(outfin,1e-7, 1 - 1e-7)
     ynp=y.detach().cpu().numpy()
     LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
-    #out0=ynp.mean()
-    out0=1/2
+    out0=1/2 #(LL(0))
+    out0=ynp.mean() #(LL(Constant))
     LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
     rhosq=1-LLM/LL0
     print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
@@ -285,17 +285,18 @@ def mTuning(filename):
         dfTune.loc[row.Index,'rhopmean']=rhos[rhos>0].mean()
         dfTune.loc[row.Index,'membership']=membership
         dfTune.loc[row.Index,'desired']=desired
+        dfTune.loc[row.Index,'successprop']=desired/row.niter
         dfTune.to_csv('tuning.csv',index=False)
     return None
 #mTuning('tuning.csv')
-
+#accept tuning id 110 as our final model: nnodes=64,nepoch=500,lrate=0.05,l2=0.002
 #%% Getting Results
-def desiredModel(betas,rsq,interDiff=0.3,batanonsg=0.03,rsqcut=0.4):
+def desiredModel(betas,rsq,interDiff=0.5/2.5,batanonsg=0.05/2.5,rsqcut=0.4): #sqrt(10-1)=3 maxElemExclAdj->2.5
     adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
     intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
     betatest=all(betas[:,1:].flatten()<batanonsg*adjL2norm)
     rhotest=rsq>rsqcut
-    testResult=intercepttest*betatest*rhotest
+    testResult=intercepttest*rhotest*betatest
     print(f'intercept: {intercepttest}, coeffs: {betatest}, rho: {rhotest}')
     return testResult
 
@@ -303,15 +304,17 @@ modelout=0 #initialize
 num_classes=2
 desired=0
 i=1
+betanames=np.array([[f"{b}_{i}" for b in np.append('ASC',pathattrstobeused)] for i in range(1, num_classes + 1)])
 
 try:
     del modelout
 except:
     pass
-while desired<30:
-    modelout, lossesout, estimates,rho = train_model(segmentation_bases,nclass=num_classes,nnodes=64,nepoch=500,lrate=0.05,l2=0.001)
+while desired<100:
+    modelout, lossesout, estimates,rho = train_model(
+        segmentation_bases,nclass=num_classes,nnodes=64,nepoch=500,lrate=0.05,l2=0.002)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
-    print(f"Estimated beta values: ['ASC','aux','wt','iv','nTrans'] for the {num_classes} classes as rows")
+    print(f"Estimated beta values with the format {betanames}:")
     print(beta_values)
     if  desiredModel(beta_values,rho):
         # Plot the loss values
@@ -320,6 +323,7 @@ while desired<30:
         plt.ylabel('Loss')
         plt.title(f'Training Loss for model {i}')
         plt.show()
+        #get probs
         modelout.eval()
         with torch.no_grad():
             _, member_prop = modelout(segmentation_bases, numeric_attrs)
@@ -330,16 +334,20 @@ while desired<30:
         if assignedmean>1.1 and assignedmean<1.9:
             LA.norm(beta_values.flatten()[beta_values.flatten()<beta_values.max()]) # for inspection
             desired+=1
-            print('%%% Desired model found! %%%')
+            print('!!!!!!!!!!!!!!!!!!!!!!!!Desired model found!!!!!!!!!!!!!!!!!!!!!!')
             if beta_values[0,0]<beta_values[1,0]: #Make class 1 as transitway likely class
                 beta_values=beta_values[[1,0],:] #swap rows
                 member_prop['assigned']=(3-member_prop.assigned) #invert 1 and 2
+                member_prop.rename(columns={"class2": "class1","class1": "class2"},inplace=True) #swap cols
+            storeit=pd.Series(np.append(np.append(rho,beta_values.flatten()),member_prop['class1']),
+                              index=np.append(np.append('rhosq',betanames.flatten()),dfIn.id))
             if desired==1:
-                pass #gen df format
-            pass #rho, coeffs, mem assignments: 1+10+N rows
-        #dataOut=pd.concat([dfIn,member_prop],axis=1)
+                dataOut=pd.DataFrame({('Model'+str(i)):storeit})
+            else:
+                dataOut[('Model'+str(i))]=storeit
+            dataOut.to_csv('modelout.csv')
     i+=1
-
+print('Finished')
 
 #%%
 def genChoicedf(dfSurvey,dfPath):
