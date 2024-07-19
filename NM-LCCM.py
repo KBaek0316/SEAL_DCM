@@ -11,6 +11,7 @@ import numpy as np
 from numpy import linalg as LA
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import KNNImputer
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -168,7 +169,6 @@ segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
                                                      pathcols=pathattrstobeused,
                                                      dropcols=['duration'],
                                                      stdcols=['age', 'income', 'duration'])
-
 #%% Model Definition
 # Define the neural network model with latent classes
 class LatentClassNN(nn.Module):
@@ -212,24 +212,44 @@ class CombinedModel(nn.Module):
         final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
         return final_probabilities, latent_classes
 
+
 # Training function
-def train_model(segmentation_bases,nclass=2,nnodes=128,nepoch=500,lrate=0.001,l2=0.1):
+def train_model(seg,nume,yval,tuning=False,nclass=2,nnodes=64,nepoch=500,lrate=0.03,l2=0.002,max_norm=1):
     '''
+    seg=segmentation_bases
+    nume=numeric_attrs
+    yval=y
+    nclass=2
+    nnodes=64
     nepoch=500
-    lrate=0.001
-    l2=0.01
+    lrate=0.03
+    l2=0.002
+    max_norm=1
+    tuning=True
     '''
-    model = CombinedModel(segmentation_bases.shape[1], nclass, numeric_attrs.shape[1],nnodes).to(device)
+    #setup
+    if tuning:
+        tr, ts = train_test_split(np.arange(len(y)), test_size=0.2, random_state=5723588)
+        seg_ts=seg[ts]
+        nume_ts=nume[ts]
+        y_ts=y[ts]
+        ts_losses = []  # List to store test or validation loss
+    else: #actual run
+        tr=range(len(y))
+    seg_tr=seg[tr]
+    nume_tr=nume[tr]
+    y_tr=y[tr]
+    tr_losses = []  # List to store training loss values
+    model = CombinedModel(seg_tr.shape[1], nclass, nume_tr.shape[1],nnodes).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lrate)
     l2_lambda = l2  # L2 regularization strength
-    losses = []  # List to store loss values
     # Training loop
     for epoch in range(nepoch):  # number of epochs
         model.train()
         optimizer.zero_grad()
-        outputs,membership = model(segmentation_bases, numeric_attrs)
-        loss = criterion(outputs,y)  # Reshape target to match output
+        outputs,membership = model(seg_tr, nume_tr)
+        loss = criterion(outputs,y_tr)  # Reshape target to match output
         # L2 regularization only for nn part
         l2_reg = 0
         for name, param in model.named_parameters():
@@ -238,20 +258,43 @@ def train_model(segmentation_bases,nclass=2,nnodes=128,nepoch=500,lrate=0.001,l2
         loss += l2_lambda * l2_reg
         #gradient flow
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm) #prevent gradient explosion
         optimizer.step()
-        losses.append(loss.item())  # Store the loss value
+        tr_losses.append(loss.item())  # Store the loss value
+        if tuning:
+            model.eval()
+            with torch.no_grad():
+                ts_outputs, _ = model(seg_ts, nume_ts)
+                ts_loss = criterion(ts_outputs, y_ts)
+                ts_losses.append(ts_loss.item())
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
     outfin=outputs.detach().cpu().numpy()
-    #outfin=np.clip(outfin,1e-7, 1 - 1e-7)
-    ynp=y.detach().cpu().numpy()
+    ynp=y_tr.detach().cpu().numpy()
     LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
-    out0=1/2 #(LL(0))
     out0=ynp.mean() #(LL(Constant))
     LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
     rhosq=1-LLM/LL0
-    print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
-    return model, losses, outputs, rhosq
+    if tuning:
+        out_ts=ts_outputs.detach().cpu().numpy()
+        yts=y_ts.detach().cpu().numpy()
+        LLM_ts=sum(yts*np.log(out_ts)+(1-yts)*np.log(1-out_ts))
+        out0_ts=yts.mean() #(LL(Constant))
+        LL0_ts=sum(yts*np.log(out0_ts)+(1-yts)*np.log(1-out0_ts))
+        rhosq_ts=1-LLM_ts/LL0_ts
+        print(f' *******Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
+        plt.plot(range(1, len(tr_losses) + 1), tr_losses, label='Training Loss')
+        plt.plot(range(1, len(ts_losses) + 1), ts_losses, label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training and Validation Loss')
+        plt.legend()
+        plt.show()
+    print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
+    if tuning:
+        return model, tr_losses, rhosq, rhosq_ts
+    else:
+        return model, tr_losses, rhosq
 #%% Model Tuning
 def mTuning(filename):
     dfTune=pd.read_csv(filename)
@@ -262,14 +305,17 @@ def mTuning(filename):
         num_classes = row.nclass
         i=0
         rhos=[]
+        rhotss=[]
+        rhoultimate=[]
         membership=0
         desired=0
         while i<row.niter:
             i+=1
-            modelout, lossesout, estimates,rho = train_model(segmentation_bases,nclass=num_classes,
+            modelout, lossesout, rho, rho_ts = train_model(segmentation_bases,numeric_attrs,y,tuning=True,nclass=num_classes,
                                                              nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
             beta_values= modelout.beta.detach().clone().cpu().numpy()
             rhos.append(rho)
+            rhotss.append=(rho_ts)
             print(beta_values)
             with torch.no_grad():
                 _, member_prop = modelout(segmentation_bases, numeric_attrs)
@@ -279,9 +325,11 @@ def mTuning(filename):
             assignedmean=member_prop.assigned.mean()
             if assignedmean>1.1 and assignedmean<1.9:
                 membership+=1
-                if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.02) and rho>0.3:
+                if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.02) and rho>0.3 and rho_ts>0:
                     desired+=1
+                    rhoultimate.append(rho_ts)
         rhos=np.array(rhos)
+        rhotss=np.array(rhotss)
         dfTune.loc[row.Index,'rho0']=sum(rhos>0)
         dfTune.loc[row.Index,'rho4']=sum(rhos>0.4)
         dfTune.loc[row.Index,'rhomax']=rhos.max()
@@ -289,6 +337,9 @@ def mTuning(filename):
         dfTune.loc[row.Index,'membership']=membership
         dfTune.loc[row.Index,'desired']=desired
         dfTune.loc[row.Index,'successprop']=desired/row.niter
+        dfTune.loc[row.Index,'postestrho']=sum(rhotss>0)
+        if desired>0:
+            dfTune.loc[row.Index,'testrhodes']=np.array(rhoultimate).mean()
         dfTune.to_csv('tuning.csv',index=False)
     return None
 #mTuning('tuning.csv')
@@ -314,8 +365,8 @@ try:
 except:
     pass
 while desired<100:
-    modelout, lossesout, estimates,rho = train_model(
-        segmentation_bases,nclass=num_classes,nnodes=64,nepoch=500,lrate=0.05,l2=0.002)
+    modelout, lossesout, rho = train_model(segmentation_bases,numeric_attrs,y,tuning=False,
+                                           nclass=num_classes,nnodes=64,nepoch=500,lrate=0.04,l2=0.002)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
     print(f"Estimated beta values with the format {betanames}:")
     print(beta_values)
@@ -334,7 +385,7 @@ while desired<100:
         member_prop['assigned']=member_prop.idxmax(axis=1)+1
         member_prop.columns=np.append(np.char.add('class',((np.arange(num_classes)+1).astype(str))),'assigned')
         assignedmean=member_prop.assigned.mean()
-        assignedmean
+        print(assignedmean)
         if assignedmean>1.1 and assignedmean<1.9:
             LA.norm(beta_values.flatten()[beta_values.flatten()<beta_values.max()]) # for inspection
             desired+=1
@@ -355,13 +406,7 @@ print('Finished')
 dfIn.match.to_clipboard(index=False,header=False)
 
 #%%
-def genChoicedf(dfSurvey,dfPath):
-    pass
-
-
-
-
-'''deprecated
+'''deprecated deterministic assignment model
 class CombinedModelD(nn.Module):
     def __init__(self, segmentation_input_size, num_classes, numeric_input_size):
         super(CombinedModelD, self).__init__()

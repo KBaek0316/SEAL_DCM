@@ -12,10 +12,10 @@ mymodel<-mlogit(match~aux+wt+iv+nTrans,dfm)
 summary(mymodel)
 
 beta_constraints <- matrix(0, nrow = 4, ncol = length(coef(mymodel)))
-beta_constraints[1, match("aux", names(coef(mymodel)))] <- -1 
-beta_constraints[2, match("wt", names(coef(mymodel)))] <- -1 
-beta_constraints[3, match("iv", names(coef(mymodel)))] <- -1 
-beta_constraints[4, match("nTrans", names(coef(mymodel)))] <- -1 
+beta_constraints[1, match("aux", names(coef(mymodel)))] <- -5 
+beta_constraints[2, match("wt", names(coef(mymodel)))] <- -5
+beta_constraints[3, match("iv", names(coef(mymodel)))] <- -5 
+beta_constraints[4, match("nTrans", names(coef(mymodel)))] <- -5 
 mymodel2 <- mlogit(match~aux+wt+iv+nTrans, data = dfm,betaConstraints = beta_constraints)
 summary(mymodel2)
 

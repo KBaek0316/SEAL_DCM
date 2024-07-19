@@ -8,9 +8,11 @@ Created on Wed Jul 17 21:46:36 2024
 import os
 import pandas as pd
 import numpy as np
-from biogeme import models, biogeme
-from biogeme.expressions import Beta, Variable,PanelLikelihoodTrajectory
 from biogeme.database import Database
+from biogeme.expressions import Variable
+import biogeme.biogeme as bio
+from biogeme import models
+from biogeme.expressions import Beta
 
 if os.environ['USERPROFILE']=='C:\\Users\\baek0040':
     WPATH=r'C:\Users\baek0040\Documents\GitHub\NM-LCCM'
@@ -20,6 +22,54 @@ pd.set_option('future.no_silent_downcasting', True)
 os.chdir(WPATH)
 
 dfMNL=pd.read_csv('dfMNL.csv')
+dfMNL['ID']=dfMNL['id']
+dfMNL['choice']=dfMNL['match']
+dfMNL['alt']=2
+dfMNL.loc[dfMNL.tway==1,'alt']=1
+
+dfMNL['chosen_alt'] = dfMNL.apply(lambda row: row['alt'] if row['choice'] == 1 else None, axis=1)
+dfMNL['chosen_alt'] = dfMNL.groupby('ID')['chosen_alt'].transform('max')
+
+database = Database('data', dfMNL)
+
+
+ID = Variable('ID')
+alt = Variable('alt')
+chosen_alt = Variable('chosen_alt')
+aux = Variable('aux')
+wt = Variable('wt')
+iv = Variable('iv')
+nTrans = Variable('nTrans')
+
+ASC = Beta('ASC', 0, None, None, 0)
+B_aux = Beta('B_aux', 0, None, 0, 0)
+B_wt = Beta('B_wt', 0, None, 0, 0)
+B_iv = Beta('B_iv', 0, None, 0, 0)
+B_nTrans = Beta('B_nTrans', 0, None, 0, 0)
+
+# Utility functions
+V1=ASC+B_aux*aux+B_wt*wt+B_iv*iv+B_nTrans*nTrans
+V2=    B_aux*aux+B_wt*wt+B_iv*iv+B_nTrans*nTrans
+
+# Associate utility functions with alternatives
+V = {1: V1, 2: V2}
+
+# Assuming all alternatives are available for all individuals
+av = {1: 1, 2: 1}
+
+# Define the model
+logprob = models.loglogit(V, av, chosen_alt)
+
+# Create the Biogeme object
+biogeme = bio.BIOGEME(database, logprob)
+biogeme.modelName = 'binary_logit_model'
+
+# Estimate the parameters
+results = biogeme.estimate()
+print(results.getEstimatedParameters())
+
+
+'''
 dfWide=dfMNL[dfMNL.tway==1].copy().rename(columns={"aux": "aux_t","wt": "wt_t","iv": "iv_t","nTrans": "nTrans_t"})
 dfWide['alt']=2
 dfWide.loc[dfWide.match==1,'alt']=1
@@ -27,7 +77,6 @@ dfSub=dfMNL[dfMNL.tway==0].copy().rename(columns={"aux": "aux_n","wt": "wt_n","i
 
 
 dfWide=pd.merge(dfWide,dfSub[['id','aux_n','wt_n','iv_n','nTrans_n']],how='left',on='id')
-
 
 
 #database = Database('database', dfMNL)
@@ -83,4 +132,4 @@ results = biogeme_object.estimate()
 
 # Print the results
 print(results.getEstimatedParameters())
-
+'''
