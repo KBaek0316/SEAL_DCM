@@ -187,10 +187,11 @@ class LatentClassNN(nn.Module):
         return x
 
 class CombinedModel(nn.Module):
-    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes):
+    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta=False):
         super(CombinedModel, self).__init__()
         self.latent_class_nn = LatentClassNN(segmentation_input_size, nnodes, num_classes)
         self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
+        self.negBeta=negBeta
 
     def forward(self, segmentation_bases, numeric_attrs):
         latent_classes = self.latent_class_nn(segmentation_bases)
@@ -201,8 +202,8 @@ class CombinedModel(nn.Module):
         intercepts = beta_expanded[:, :, 0:1] #dim: nobs * nclass * 1
         non_intercepts = beta_expanded[:, :, 1:] #dim: nobs * nclass * nnumcols
         # Apply negative ReLU to enforce non-positive betas
-        non_intercepts = -torch.nn.functional.relu(non_intercepts)
-        #    non_intercepts = -torch.abs(non_intercepts) #deprecated
+        if self.negBeta:
+            non_intercepts = -torch.nn.functional.relu(non_intercepts) #alternative: -torch.abs(non_intercepts)
         # Concatenate intercepts and transformed non-intercepts
         constrained_beta_expanded = torch.cat([intercepts, non_intercepts], dim=2) #dim 2 because concatenate 1 and nnumcols
         # Compute logits for each class
@@ -214,7 +215,7 @@ class CombinedModel(nn.Module):
 
 
 # Training function
-def train_model(seg,nume,yval,tuning=False,nclass=2,nnodes=64,nepoch=500,lrate=0.03,l2=0.002,max_norm=1):
+def train_model(seg,nume,yval,tuning=False,rho0=False,max_norm=5,nclass=2,nnodes=64,nepoch=500,lrate=0.03,l2=0.002):
     '''
     seg=segmentation_bases
     nume=numeric_attrs
@@ -226,6 +227,7 @@ def train_model(seg,nume,yval,tuning=False,nclass=2,nnodes=64,nepoch=500,lrate=0
     l2=0.002
     max_norm=1
     tuning=True
+    rho0=True
     '''
     #setup
     if tuning:
@@ -258,7 +260,8 @@ def train_model(seg,nume,yval,tuning=False,nclass=2,nnodes=64,nepoch=500,lrate=0
         loss += l2_lambda * l2_reg
         #gradient flow
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm) #prevent gradient explosion
+        if max_norm is not None:
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm) #prevent gradient explosion
         optimizer.step()
         tr_losses.append(loss.item())  # Store the loss value
         if tuning:
@@ -273,13 +276,18 @@ def train_model(seg,nume,yval,tuning=False,nclass=2,nnodes=64,nepoch=500,lrate=0
     ynp=y_tr.detach().cpu().numpy()
     LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
     out0=ynp.mean() #(LL(Constant))
+    if rho0:
+        out0=1/nclass #LL(0)
     LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
     rhosq=1-LLM/LL0
+    print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
     if tuning:
         out_ts=ts_outputs.detach().cpu().numpy()
         yts=y_ts.detach().cpu().numpy()
         LLM_ts=sum(yts*np.log(out_ts)+(1-yts)*np.log(1-out_ts))
         out0_ts=yts.mean() #(LL(Constant))
+        if rho0:
+            out0_ts=1/nclass #LL(0)
         LL0_ts=sum(yts*np.log(out0_ts)+(1-yts)*np.log(1-out0_ts))
         rhosq_ts=1-LLM_ts/LL0_ts
         print(f' *******Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
@@ -287,16 +295,15 @@ def train_model(seg,nume,yval,tuning=False,nclass=2,nnodes=64,nepoch=500,lrate=0
         plt.plot(range(1, len(ts_losses) + 1), ts_losses, label='Validation Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
+        plt.title(f'Losses (nnodes: {nnodes} lrate: {lrate:.3f}, l2:{l2:.3f})')
         plt.legend()
         plt.show()
-    print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
-    if tuning:
         return model, tr_losses, rhosq, rhosq_ts
     else:
         return model, tr_losses, rhosq
 #%% Model Tuning
 def mTuning(filename):
+    #filename='tuning.csv'
     dfTune=pd.read_csv(filename)
     for row in dfTune.itertuples():
         if not np.isnan(row.rho0):
@@ -310,13 +317,14 @@ def mTuning(filename):
         membership=0
         desired=0
         while i<row.niter:
-            i+=1
-            modelout, lossesout, rho, rho_ts = train_model(segmentation_bases,numeric_attrs,y,tuning=True,nclass=num_classes,
-                                                             nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
+            i+=1 #max_norm=None or max_norm=5
+            modelout, lossesout, rho, rho_ts = train_model(segmentation_bases,numeric_attrs,y,tuning=True,rho0=True,max_norm=3,
+                                                           nclass=num_classes,nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
             beta_values= modelout.beta.detach().clone().cpu().numpy()
             rhos.append(rho)
-            rhotss.append=(rho_ts)
+            rhotss.append(rho_ts)
             print(beta_values)
+            adjL2norm=LA.norm(beta_values.flatten()[beta_values.flatten()<beta_values.max()])
             with torch.no_grad():
                 _, member_prop = modelout(segmentation_bases, numeric_attrs)
             member_prop=pd.DataFrame(member_prop.detach().cpu().numpy().astype(float))
@@ -325,9 +333,11 @@ def mTuning(filename):
             assignedmean=member_prop.assigned.mean()
             if assignedmean>1.1 and assignedmean<1.9:
                 membership+=1
-                if beta_values[:,0].prod()<0 and all(beta_values[:,1:].flatten()<0.02) and rho>0.3 and rho_ts>0:
+                if abs(beta_values[0,0]-beta_values[1,0])>adjL2norm*0.5 and all(beta_values[:,1:].flatten()<adjL2norm*0.05) and rho>0.3 and rho_ts>0:
+                    print('!!!!!!Semi-desired model found!!!!!!!')
                     desired+=1
                     rhoultimate.append(rho_ts)
+            print(str(i))
         rhos=np.array(rhos)
         rhotss=np.array(rhotss)
         dfTune.loc[row.Index,'rho0']=sum(rhos>0)
@@ -342,14 +352,14 @@ def mTuning(filename):
             dfTune.loc[row.Index,'testrhodes']=np.array(rhoultimate).mean()
         dfTune.to_csv('tuning.csv',index=False)
     return None
-#mTuning('tuning.csv')
+mTuning('tuning.csv')
 #accept tuning id 110 as our final model: nnodes=64,nepoch=500,lrate=0.05,l2=0.002
 #%% Getting Results
-def desiredModel(betas,rsq,interDiff=0.5/2.5,batanonsg=0.05/2.5,rsqcut=0.4): #sqrt(10-1)=3 maxElemExclAdj->2.5
+def desiredModel(betas,rsq,interDiff=0.5/2.5,betaNonSig=0.05/2.5,rsqCut=0.4): #sqrt(10-1)=3 maxElemExclAdj->2.5
     adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
     intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
-    betatest=all(betas[:,1:].flatten()<batanonsg*adjL2norm)
-    rhotest=rsq>rsqcut
+    betatest=all(betas[:,1:].flatten()<betaNonSig*adjL2norm)
+    rhotest=rsq>rsqCut
     testResult=intercepttest*rhotest*betatest
     print(f'intercept: {intercepttest}, coeffs: {betatest}, rho: {rhotest}')
     return testResult
@@ -365,7 +375,7 @@ try:
 except:
     pass
 while desired<100:
-    modelout, lossesout, rho = train_model(segmentation_bases,numeric_attrs,y,tuning=False,
+    modelout, lossesout, rho = train_model(segmentation_bases,numeric_attrs,y,tuning=False,rho0=False,max_norm=3,
                                            nclass=num_classes,nnodes=64,nepoch=500,lrate=0.04,l2=0.002)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
     print(f"Estimated beta values with the format {betanames}:")
