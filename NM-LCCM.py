@@ -218,15 +218,15 @@ class CombinedModel(nn.Module):
         numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
         beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1)
         # Separate intercept and non-intercept beta values
-        intercepts = beta_expanded[:, :, 0:1] #dim: nobs * nclass * 1
-        non_intercepts = beta_expanded[:, :, 1:] #dim: nobs * nclass * nnumcols
+        beta_free = beta_expanded[:, :, :-2] #dim: nobs * nclass * cols
+        beta_const = beta_expanded[:, :, -2:] #dim: nobs * nclass * cols
         # Apply negative ReLU to enforce non-positive betas
         if self.negBeta:
-            non_intercepts = -torch.nn.functional.relu(-1*non_intercepts) #alternative: -torch.abs(non_intercepts)
+            beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
         # Concatenate intercepts and transformed non-intercepts
-        constrained_beta_expanded = torch.cat([intercepts, non_intercepts], dim=2) #dim 2 because concatenate 1 and nnumcols
+        beta_expanded = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
         # Compute logits for each class
-        logits = torch.bmm(numeric_attrs_with_intercept.unsqueeze(1), constrained_beta_expanded.permute(0, 2, 1)).squeeze(1)
+        logits = torch.bmm(numeric_attrs_with_intercept.unsqueeze(1), beta_expanded.permute(0, 2, 1)).squeeze(1)
         # Aggregate class probabilities for the final output probability of y=1
         final_probabilities = torch.sum(latent_classes * torch.sigmoid(logits), dim=1)
         final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
@@ -236,7 +236,8 @@ class CombinedModel(nn.Module):
 
 
 # Training function
-def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,max_norm=2,nclass=2,nnodes=64,nepoch=300,lrate=0.05,l2=0.005):
+def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,
+                max_norm=2,nclass=2,nnodes=64,nepoch=300,lrate=0.05,l2=0.005):
     '''
     seg=segmentation_bases
     nume=numeric_attrs
@@ -278,7 +279,7 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,max_norm=2
         l2_reg = 0
         for name, param in model.named_parameters():
             if 'latent_class_nn' in name:
-            #if 'latent_class_nn' in name or 'beta' in name and param is not model.beta[:, 1:]:
+            #if 'latent_class_nn' in name or 'beta' in name and const is not model.beta[:, 1:]:
                 l2_reg += torch.norm(param)
         loss += l2_lambda * l2_reg
         #gradient flow
@@ -329,9 +330,9 @@ def desiredModel(betas,rsq,rhots=None,strict=False,interDiff=0.5/2.5,betaNonSig=
     adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
     intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
     betatest=all(betas[:,1:].flatten()<betaNonSig*adjL2norm)
-    if strict: #when nonpositive constraints are applied to the model
+    if strict: #when nonpositive constraints are applied to ivt and ntrans
         intercepttest=(betas[:,0].prod()<0)
-        betatest=2*sum(beta_values[:,1:].flatten()<0)>len(beta_values[:,1:].flatten())
+        betatest=sum(betas[:,-2:].flatten()<0)>(len(betas[:,-2:].flatten())-2) #allow one positive beta
     rhotest=rsq>rsqCut
     if rhots is not None:
         rhotest= rhotest*(rhots*3>rsq)
@@ -361,8 +362,8 @@ def mTuning(filename):
                 segmentation_bases,numeric_attrs,y,testVal=True,rho0=True,negConst=True,max_norm=row.maxnorm,
                 nclass=num_classes,nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
             beta_values= modelout.beta.detach().clone().cpu().numpy()
-            if modelout.nonPosConst():
-                beta_values[:,1:]=-1*((-1*beta_values[:,1:] * (-1*beta_values[:,1:]>0)))
+            if modelout.nonPosConst(): #apply neg relu
+                beta_values[:,-2:]=-1*((-1*beta_values[:,-2:] * (-1*beta_values[:,-2:]>0)))
             print(beta_values)
             rhos.append(rho)
             rhotss.append(rho_ts)
@@ -374,7 +375,8 @@ def mTuning(filename):
             assignedmean=member_prop.assigned.mean()
             if assignedmean>1.1 and assignedmean<1.9:
                 membership+=1
-                if desiredModel(beta_values,rho,rho_ts,strict=modelout.nonPosConst(),interDiff=0.5,betaNonSig=0.05):
+                if desiredModel(beta_values,rho,rho_ts,strict=modelout.nonPosConst(),
+                                interDiff=0.5,betaNonSig=0.05,rsqCut=0.3):
                     print('!!!!!!Semi-desired model found!!!!!!!')
                     desired+=1
                     rhoultimate.append(rho_ts)
@@ -407,8 +409,8 @@ while desired<300:
         segmentation_bases,numeric_attrs,y,testVal=True,rho0=False,negConst=True,max_norm=2,
         nclass=num_classes,nnodes=64,nepoch=300,lrate=0.05,l2=0.005)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
-    if modelout.nonPosConst():
-        beta_values[:,1:]=-1*((-1*beta_values[:,1:] * (-1*beta_values[:,1:]>0)))
+    if modelout.nonPosConst():#apply neg relu
+        beta_values[:,-2:]=-1*((-1*beta_values[:,-2:] * (-1*beta_values[:,-2:]>0)))
     print(f"Estimated beta values with the format {betanames}:")
     print(beta_values)
     try:
