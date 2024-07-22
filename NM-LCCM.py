@@ -28,17 +28,22 @@ os.chdir(WPATH)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
-
-pathattrstobeused=['aux','wt','iv','nTrans'] #available: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'iv'
+#available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt'
+pathattrstobeused=['aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
 
 #%% Data Preprocessing
-def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
+def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,strict=False):
     '''for debugging
     surFile='survey'
     pathFile='paths'
     ver=2022
     convFile='dfConv'
     imputeCols=['duration']
+    tivdomcut=0.5
+    minxferpen=5
+    abscut=15
+    propcut=1.5
+    strict=False
     '''
     dfSurveyRaw=pd.read_csv(surFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
     dfConversion=pd.read_csv(convFile+r'.csv')
@@ -91,21 +96,24 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     dfPath=dfPathRaw.drop(columns=['detail','cost','line','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
     print(str(len(dfPath.sid.unique()))+' respondents have at least one path identified from V-SBSP')
     dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
+    dfPath['ntiv']=dfPath['iv']-dfPath['tiv'] #non-transitway IVT
+    dfPath['aux']=dfPath['wk']+dfPath['nwk'] #access and egress time combined
+    dfPath['ov']=dfPath['aux']+dfPath['wt'] #out-of-vehicle time
+    dfPath['tt']=dfPath.iv+dfPath.ov
+    dfPath['cost']=dfPath.tt+minxferpen*dfPath.nTrans
     dfPath['tway']=0
-    dfPath['ntiv']=dfPath['iv']-dfPath['tiv']
-    dfPath.loc[dfPath.tiv>dfPath.ntiv,'tway']=1
+    dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
     dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.tway==1,'sid'])]
-    dfPath['elap']=dfPath.label_t-dfPath.realDep
     #pairing starts
     dfCT=dfPath.loc[(dfPath.tway==1) & (dfPath.match==1),:] #chosen transitway
-    dfCT=dfCT.loc[dfCT.groupby(['sid'])['elap'].rank(method='first')==1].reset_index(drop=True)
+    dfCT=dfCT.loc[dfCT.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
     dfAN=dfPath.loc[(dfPath.sid.isin(dfCT.sid)) & (dfPath.tway==0) & (dfPath.match==0),:] #alternative nontransitway
-    dfAN=dfAN.loc[dfAN.groupby(['sid'])['elap'].rank(method='first')==1].reset_index(drop=True)
+    dfAN=dfAN.loc[dfAN.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
     dfCT=dfCT.loc[dfCT.sid.isin(dfAN.sid),:]
     dfCN=dfPath.loc[(dfPath.tway==0) & (dfPath.match==1),:] #chosen nontransitway
-    dfCN=dfCN.loc[dfCN.groupby(['sid'])['elap'].rank(method='first')==1].reset_index(drop=True)
+    dfCN=dfCN.loc[dfCN.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
     dfAT=dfPath.loc[(dfPath.sid.isin(dfCN.sid)) & (dfPath.tway==1) & (dfPath.match==0),:] #alternative Transitway
-    dfAT=dfAT.loc[dfAT.groupby(['sid'])['elap'].rank(method='first')==1].reset_index(drop=True)
+    dfAT=dfAT.loc[dfAT.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
     dfCN=dfCN.loc[dfCN.sid.isin(dfAT.sid),:]
     dfPath=pd.concat([dfCT,dfAN,dfCN,dfAT]).sort_values(['sid','tway']).reset_index(drop=True)
     dfPath=dfPath.loc[dfPath.sid.isin(np.union1d(np.intersect1d(dfCT.sid,dfAN.sid),np.intersect1d(dfCN.sid,dfAT.sid))),:]
@@ -125,45 +133,56 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[]):
     else:
         pass # only keep complete info?
     #hardcoding now...
-    dfSurvey['duration']=KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,12]
+    dfSurvey['duration']=KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,np.where(dfSurvey.columns=='duration')[0][0]-1]
     #final path filtering
-    pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','elap':['count','min','max']}).reset_index()
-    pathfilter.columns=['sid','tway','match','count','mint','maxt']
+    pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
+    pathfilter.columns=['sid','tway','match','counts','mint','maxt']
+    if not all([all(pathfilter.tway==1),all(pathfilter.match==1),all(pathfilter.counts==2)]):
+        raise Exception('Pairing Failed')
     pathfilter['compDiff']=pathfilter.maxt-pathfilter.mint
     pathfilter['compProp']=pathfilter.maxt/pathfilter.mint
-    pathfilter2=pathfilter.loc[(pathfilter.compDiff<10) | ((pathfilter.compProp<1.5)) ]
+    pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) | ((pathfilter.compProp<propcut))]
+    if strict: # from 'or' to 'and' condition when strict
+        pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) & ((pathfilter.compProp<propcut))]
     dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:].reset_index(drop=True)
     dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]
-    len(pathfilter2)/len(pathfilter)
     print(f'{len(dfPath.sid.unique())} paths paired ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
-    dfPath=dfPath.drop(columns=['ind','label_t','label_c','realDep','routes','elap']).rename(columns={"sid": "id"})
+    dfPath=dfPath.drop(columns=['ind','label_t','label_c']).rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
+    dfPath['ov']=dfPath['aux']+dfPath['wt']
+    #dfPath['iv']=-1*dfPath['iv']
     dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
     dfMNL.to_csv('dfMNL.csv',index=False)
     return dfSurvey, dfPath
 
-dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'])
-
-
 def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
+    '''
+    pathcols=pathattrstobeused
+    dropcols=['duration']
+    stdcols=['age', 'income', 'duration']
+    '''
     #dfMain: Tway paths #dfSub: nonTway paths
     dfMain=dfPath.loc[dfPath.tway==1,np.append(['id','match'],pathcols)]
     dfSub=dfPath.loc[dfPath.tway==0,np.append(['id','match'],pathcols)]
     if not np.all(dfMain.id.values==dfSub.id.values):
         raise Exception('organize dfPath or recheck the pairing steps')
-    dfMain.iloc[:,2:]=dfMain.iloc[:,2:].to_numpy()-dfSub.iloc[:,2:].to_numpy()
+    dfMain.iloc[:,2:]=dfMain.iloc[:,2:].to_numpy()-dfSub.iloc[:,2:].to_numpy() #tway - nontway
     #final survey preprocessing with standardization
     dfSurvey2=dfSurvey.drop(columns=dropcols).copy()
     if len(stdcols)>0:
         scaler=StandardScaler()
         stdized=pd.DataFrame(scaler.fit_transform(dfSurvey[stdcols]),columns=stdcols)
         dfSurvey2.update(stdized)
-    dfMain=pd.merge(dfSurvey2,dfMain,on='id')
-    chloc=np.where(dfMain.columns=='match')[0][0]
+    dfMain=pd.merge(dfSurvey2,dfMain,on='id') #now it is tway-non matrix and match==1 means chose tway
+    chloc=np.where(dfMain.columns=='match')[0][0] #col index of the column match
     seg=torch.tensor(dfMain.iloc[:,1:chloc].to_numpy(),dtype=torch.float32).to(device)
     nume=torch.tensor(dfMain.iloc[:,(chloc+1):].to_numpy(),dtype=torch.float32).to(device)
     ch=torch.tensor(dfMain.iloc[:,chloc].to_numpy(),dtype=torch.float32).to(device)
     return seg, nume, ch, dfMain
+
+
+dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
+                                  tivdomcut=0,minxferpen=3,abscut=20,propcut=1.5,strict=True)
 
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
                                                      pathcols=pathattrstobeused,
@@ -187,7 +206,7 @@ class LatentClassNN(nn.Module):
         return x
 
 class CombinedModel(nn.Module):
-    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta=False):
+    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta):
         super(CombinedModel, self).__init__()
         self.latent_class_nn = LatentClassNN(segmentation_input_size, nnodes, num_classes)
         self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
@@ -203,7 +222,7 @@ class CombinedModel(nn.Module):
         non_intercepts = beta_expanded[:, :, 1:] #dim: nobs * nclass * nnumcols
         # Apply negative ReLU to enforce non-positive betas
         if self.negBeta:
-            non_intercepts = -torch.nn.functional.relu(non_intercepts) #alternative: -torch.abs(non_intercepts)
+            non_intercepts = -torch.nn.functional.relu(-1*non_intercepts) #alternative: -torch.abs(non_intercepts)
         # Concatenate intercepts and transformed non-intercepts
         constrained_beta_expanded = torch.cat([intercepts, non_intercepts], dim=2) #dim 2 because concatenate 1 and nnumcols
         # Compute logits for each class
@@ -212,10 +231,12 @@ class CombinedModel(nn.Module):
         final_probabilities = torch.sum(latent_classes * torch.sigmoid(logits), dim=1)
         final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
         return final_probabilities, latent_classes
+    def nonPosConst(self):
+        return self.negBeta
 
 
 # Training function
-def train_model(seg,nume,yval,testVal=False,rho0=False,max_norm=2,nclass=2,nnodes=64,nepoch=300,lrate=0.05,l2=0.005):
+def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,max_norm=2,nclass=2,nnodes=64,nepoch=300,lrate=0.05,l2=0.005):
     '''
     seg=segmentation_bases
     nume=numeric_attrs
@@ -225,6 +246,7 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,max_norm=2,nclass=2,nnode
     nepoch=500
     lrate=0.03
     l2=0.002
+    negConst=True
     max_norm=1
     testVal=True
     rho0=True
@@ -242,7 +264,7 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,max_norm=2,nclass=2,nnode
     nume_tr=nume[tr]
     y_tr=y[tr]
     tr_losses = []  # List to store training loss values
-    model = CombinedModel(seg_tr.shape[1], nclass, nume_tr.shape[1],nnodes).to(device)
+    model = CombinedModel(seg_tr.shape[1], nclass, nume_tr.shape[1],nnodes,negBeta=negConst).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lrate)
     l2_lambda = l2  # L2 regularization strength
@@ -256,6 +278,7 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,max_norm=2,nclass=2,nnode
         l2_reg = 0
         for name, param in model.named_parameters():
             if 'latent_class_nn' in name:
+            #if 'latent_class_nn' in name or 'beta' in name and param is not model.beta[:, 1:]:
                 l2_reg += torch.norm(param)
         loss += l2_lambda * l2_reg
         #gradient flow
@@ -302,8 +325,24 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,max_norm=2,nclass=2,nnode
     else:
         return model, tr_losses, rhosq, None
 #%% Model Tuning
+def desiredModel(betas,rsq,rhots=None,strict=False,interDiff=0.5/2.5,betaNonSig=0.05/2.5,rsqCut=0.4): #sqrt(10-1)=3 maxElemExclAdj->2.5
+    adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
+    intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
+    betatest=all(betas[:,1:].flatten()<betaNonSig*adjL2norm)
+    if strict: #when nonpositive constraints are applied to the model
+        intercepttest=(betas[:,0].prod()<0)
+        betatest=2*sum(beta_values[:,1:].flatten()<0)>len(beta_values[:,1:].flatten())
+    rhotest=rsq>rsqCut
+    if rhots is not None:
+        rhotest= rhotest*(rhots*3>rsq)
+    testResult=intercepttest*rhotest*betatest
+    print(f'intercept: {intercepttest}, coeffs: {betatest}, rho: {rhotest}')
+    return testResult
+
 def mTuning(filename):
-    #filename='tuning.csv'
+    '''
+    filename='tuning.csv'
+    '''
     dfTune=pd.read_csv(filename)
     for row in dfTune.itertuples():
         if not np.isnan(row.rho0):
@@ -318,13 +357,15 @@ def mTuning(filename):
         desired=0
         while i<row.niter:
             i+=1 #max_norm=None or max_norm=5 parametrize this in tuning.csv for future runs
-            modelout, lossesout, rho, rho_ts = train_model(segmentation_bases,numeric_attrs,y,testVal=True,rho0=True,max_norm=2,
-                                                           nclass=num_classes,nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
+            modelout, lossesout, rho, rho_ts = train_model(
+                segmentation_bases,numeric_attrs,y,testVal=True,rho0=True,negConst=True,max_norm=row.maxnorm,
+                nclass=num_classes,nnodes=row.nnodes,nepoch=row.nepoch,lrate=row.lrate,l2=row.l2)
             beta_values= modelout.beta.detach().clone().cpu().numpy()
+            if modelout.nonPosConst():
+                beta_values[:,1:]=-1*((-1*beta_values[:,1:] * (-1*beta_values[:,1:]>0)))
+            print(beta_values)
             rhos.append(rho)
             rhotss.append(rho_ts)
-            print(beta_values)
-            adjL2norm=LA.norm(beta_values.flatten()[beta_values.flatten()<beta_values.max()])
             with torch.no_grad():
                 _, member_prop = modelout(segmentation_bases, numeric_attrs)
             member_prop=pd.DataFrame(member_prop.detach().cpu().numpy().astype(float))
@@ -333,7 +374,7 @@ def mTuning(filename):
             assignedmean=member_prop.assigned.mean()
             if assignedmean>1.1 and assignedmean<1.9:
                 membership+=1
-                if abs(beta_values[0,0]-beta_values[1,0])>adjL2norm*0.5 and all(beta_values[:,1:].flatten()<adjL2norm*0.05) and rho>0.3 and rho_ts>0:
+                if desiredModel(beta_values,rho,rho_ts,strict=modelout.nonPosConst(),interDiff=0.5,betaNonSig=0.05):
                     print('!!!!!!Semi-desired model found!!!!!!!')
                     desired+=1
                     rhoultimate.append(rho_ts)
@@ -355,32 +396,25 @@ def mTuning(filename):
 #mTuning('tuning.csv')
 #accept tuning id 294 as our final model: maxnorm=2, nnodes=64,nepoch=300,lrate=0.05,l2=0.005 
 #%% Getting Results
-def desiredModel(betas,rsq,rhots=None,interDiff=0.5/2.5,betaNonSig=0.05/2.5,rsqCut=0.4): #sqrt(10-1)=3 maxElemExclAdj->2.5
-    adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
-    intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
-    betatest=all(betas[:,1:].flatten()<betaNonSig*adjL2norm)
-    rhotest=rsq>rsqCut
-    testResult=intercepttest*rhotest*betatest
-    print(f'intercept: {intercepttest}, coeffs: {betatest}, rho: {rhotest}')
-    return testResult
 
 modelout=0 #initialize
 num_classes=2
 desired=0
 i=1
 betanames=np.array([[f"{b}_{i}" for b in np.append('ASC',pathattrstobeused)] for i in range(1, num_classes + 1)])
-
-
 while desired<300:
-    modelout, lossesout, rho, rho_ts = train_model(segmentation_bases,numeric_attrs,y,testVal=True,rho0=False,max_norm=2,
-                                           nclass=num_classes,nnodes=64,nepoch=300,lrate=0.05,l2=0.005)
+    modelout, lossesout, rho, rho_ts = train_model(
+        segmentation_bases,numeric_attrs,y,testVal=True,rho0=False,negConst=True,max_norm=2,
+        nclass=num_classes,nnodes=64,nepoch=300,lrate=0.05,l2=0.005)
     beta_values= modelout.beta.detach().clone().cpu().numpy()
+    if modelout.nonPosConst():
+        beta_values[:,1:]=-1*((-1*beta_values[:,1:] * (-1*beta_values[:,1:]>0)))
     print(f"Estimated beta values with the format {betanames}:")
     print(beta_values)
     try:
-        isDesired=desiredModel(betas=beta_values,rsq=rho,rhots=rho_ts)
+        isDesired=desiredModel(betas=beta_values,rsq=rho,rhots=rho_ts,strict=modelout.nonPosConst())
     except:
-        isDesired=desiredModel(betas=beta_values,rsq=rho)
+        isDesired=desiredModel(betas=beta_values,rsq=rho,strict=modelout.nonPosConst())
         rho_ts=-1
     if  isDesired:
         #get probs

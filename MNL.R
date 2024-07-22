@@ -6,10 +6,18 @@ df<-read.csv("dfMNL.csv",header=TRUE)
 df$id<-as.character(df$id)
 df$mode=ifelse(df$tway==1,"Tway","Non")
 
+dftrts<-read.csv("modelout_sample.csv",header=TRUE)
+
+
 dfm<-mlogit.data(df,shape="long",choice="match",alt.var="mode")
 
 mymodel<-mlogit(match~aux+wt+iv+nTrans,dfm)
 summary(mymodel)
+
+mymodel2<-mlogit(match~ov+iv+nTrans,dfm)
+summary(mymodel2)
+
+
 
 beta_constraints <- matrix(0, nrow = 4, ncol = length(coef(mymodel)))
 beta_constraints[1, match("aux", names(coef(mymodel)))] <- -5 
