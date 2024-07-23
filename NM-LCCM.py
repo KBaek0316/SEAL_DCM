@@ -331,7 +331,7 @@ def desiredModel(betas,rsq,rhots=None,strict=False,interDiff=0.5/2.5,betaNonSig=
     intercepttest=((betas[:,0].prod()<0) or (abs(betas[0,0]-betas[1,0])>interDiff*adjL2norm))
     betatest=all(betas[:,1:].flatten()<betaNonSig*adjL2norm)
     if strict: #when nonpositive constraints are applied to ivt and ntrans
-        intercepttest=(betas[:,0].prod()<0)
+        #intercepttest=(betas[:,0].prod()<0)
         betatest=sum(betas[:,-2:].flatten()<0)>(len(betas[:,-2:].flatten())-2) #allow one positive beta
     rhotest=rsq>rsqCut
     if rhots is not None:
