@@ -95,7 +95,6 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     print('Among '+str(len(dfPathRaw.sid.unique()))+' survey respondents examined,')
     dfPath=dfPathRaw.drop(columns=['detail','cost','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
     print(str(len(dfPath.sid.unique()))+' respondents have at least one path identified from V-SBSP')
-    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
     dfPath['ntiv']=dfPath['iv']-dfPath['tiv'] #non-transitway IVT
     dfPath['aux']=dfPath['wk']+dfPath['nwk'] #access and egress time combined
     dfPath['ov']=dfPath['aux']+dfPath['wt'] #out-of-vehicle time
@@ -103,13 +102,22 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath['cost']=dfPath.tt+minxferpen*dfPath.nTrans
     dfPath['tway']=0
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
-    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.tway==1,'sid'])]
     #After TRBAM 2025 Submission
     dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
-    
-    
+    dfPath['compDiff']=dfPath.cost-dfPath.spcost
+    dfPath['compProp']=dfPath.cost/dfPath.spcost
+    dfPath=dfPath.loc[(dfPath.compDiff<abscut)|(dfPath.compProp<propcut),:]
+    if strict:
+        dfPath=dfPath.loc[(dfPath.compDiff<abscut)&(dfPath.compProp<propcut),:]
+    pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
+    pathfilter.columns=['sid','tway','match','counts','mint','maxt']
+    pathfilter2=pathfilter.loc[(pathfilter.counts>1)&(pathfilter.match>0)&(pathfilter.tway>0),:]
+    dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]#.drop(columns=['spcost','compDiff','compProp'])
+    print(f'{len(dfPath.sid.unique())} choice sets generated ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     ''' TP-NP pairing (deprecated after TRBAM 2025 Submission)
     #pairing starts
+    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
+    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.tway==1,'sid'])]
     dfCT=dfPath.loc[(dfPath.tway==1) & (dfPath.match==1),:] #chosen transitway
     dfCT=dfCT.loc[dfCT.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
     dfAN=dfPath.loc[(dfPath.sid.isin(dfCT.sid)) & (dfPath.tway==0) & (dfPath.match==0),:] #alternative nontransitway
@@ -152,14 +160,13 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
         pass # only keep complete info?
     #hardcoding now...
     dfSurvey['duration']=KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,np.where(dfSurvey.columns=='duration')[0][0]-1]
-    #final path filtering
- 
     #final organization
     dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:].reset_index(drop=True)
     dfPath=dfPath.drop(columns=['ind','label_t','label_c']).rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
     dfPath['ov']=dfPath['aux']+dfPath['wt']
     #dfPath['iv']=-1*dfPath['iv']
+    dfPath=dfPath.sort_values(['id','compProp']).reset_index(drop=True)
     dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
     dfMNL.to_csv('dfMNL.csv',index=False)
     return dfSurvey, dfPath
@@ -196,6 +203,8 @@ def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]
 
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
                                   tivdomcut=0,minxferpen=3,abscut=20,propcut=1.5,strict=True)
+
+
 
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
                                                      pathcols=pathattrstobeused,
