@@ -92,8 +92,8 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfSurvey.loc[dfSurvey.purpose=='HB','purpose']='HBO' #there is one instance whose O and D are both Home
     #move on to the path preprocessing; paths retrieved from the repository SchBasedSPwithTE_Pandas
     dfPathRaw=pd.read_csv(pathFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
-    print('Among '+str(len(dfPathRaw.sid.unique())-2)+' survey respondents examined,')
-    dfPath=dfPathRaw.drop(columns=['detail','cost','line','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
+    print('Among '+str(len(dfPathRaw.sid.unique()))+' survey respondents examined,')
+    dfPath=dfPathRaw.drop(columns=['detail','cost','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
     print(str(len(dfPath.sid.unique()))+' respondents have at least one path identified from V-SBSP')
     dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
     dfPath['ntiv']=dfPath['iv']-dfPath['tiv'] #non-transitway IVT
@@ -104,6 +104,11 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath['tway']=0
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
     dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.tway==1,'sid'])]
+    #After TRBAM 2025 Submission
+    dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
+    
+    
+    ''' TP-NP pairing (deprecated after TRBAM 2025 Submission)
     #pairing starts
     dfCT=dfPath.loc[(dfPath.tway==1) & (dfPath.match==1),:] #chosen transitway
     dfCT=dfCT.loc[dfCT.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
@@ -119,6 +124,19 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath=dfPath.loc[dfPath.sid.isin(np.union1d(np.intersect1d(dfCT.sid,dfAN.sid),np.intersect1d(dfCN.sid,dfAT.sid))),:]
     if len(dfPath.sid.unique())*2 != len(dfPath):
         raise Exception('Pairing Failed')
+    
+    pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
+    pathfilter.columns=['sid','tway','match','counts','mint','maxt']
+    if not all([all(pathfilter.tway==1),all(pathfilter.match==1),all(pathfilter.counts==2)]):
+        raise Exception('Pairing Failed')
+    pathfilter['compDiff']=pathfilter.maxt-pathfilter.mint
+    pathfilter['compProp']=pathfilter.maxt/pathfilter.mint
+    pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) | ((pathfilter.compProp<propcut))]
+    if strict: # from 'or' to 'and' condition when strict
+        pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) & ((pathfilter.compProp<propcut))]
+    dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]
+    print(f'{len(dfPath.sid.unique())} paths paired ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
+    '''
     #Imputing activity duration
     dfSurvey=pd.merge(dfSurvey,dfPathRaw.loc[dfPathRaw.match==1,['sid','realDep']],left_on='id',right_on='sid')
     dfSurvey['duration']=dfSurvey.oppotime-dfSurvey.realDep/60
@@ -135,18 +153,9 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     #hardcoding now...
     dfSurvey['duration']=KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,np.where(dfSurvey.columns=='duration')[0][0]-1]
     #final path filtering
-    pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
-    pathfilter.columns=['sid','tway','match','counts','mint','maxt']
-    if not all([all(pathfilter.tway==1),all(pathfilter.match==1),all(pathfilter.counts==2)]):
-        raise Exception('Pairing Failed')
-    pathfilter['compDiff']=pathfilter.maxt-pathfilter.mint
-    pathfilter['compProp']=pathfilter.maxt/pathfilter.mint
-    pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) | ((pathfilter.compProp<propcut))]
-    if strict: # from 'or' to 'and' condition when strict
-        pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) & ((pathfilter.compProp<propcut))]
+ 
+    #final organization
     dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:].reset_index(drop=True)
-    dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]
-    print(f'{len(dfPath.sid.unique())} paths paired ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     dfPath=dfPath.drop(columns=['ind','label_t','label_c']).rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
     dfPath['ov']=dfPath['aux']+dfPath['wt']
@@ -154,6 +163,10 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
     dfMNL.to_csv('dfMNL.csv',index=False)
     return dfSurvey, dfPath
+
+def calcPathSize():
+    pass
+
 
 def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
     '''
