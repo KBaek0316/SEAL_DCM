@@ -172,6 +172,48 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     return dfSurvey, dfPath
 
 def calcPathSize():
+    import geopandas as gpd
+    from shapely import wkt
+    # Sample pandas DataFrame containing WKT line geometries
+    df = pd.DataFrame({
+        'line': [
+            'LINESTRING (30 10, 10 30, 40 40)',  # Example WKT LineStrings
+            'LINESTRING (10 30, 40 40, 20 20)',
+            'LINESTRING (40 40, 50 50, 10 30)'
+        ]
+    })
+    
+    # Convert the WKT strings to shapely geometries using GeoPandas
+    df['geometry'] = df['line'].apply(wkt.loads)
+    
+    # Initialize an empty dictionary to store nodes and their frequency
+    node_frequency = {}
+    
+    # Populate the node frequency dictionary
+    for geom in df['geometry']:
+        if geom.geom_type == 'LineString':
+            nodes = list(geom.coords)
+            for node in nodes:
+                if node in node_frequency:
+                    node_frequency[node] += 1
+                else:
+                    node_frequency[node] = 1
+    
+    # Function to calculate the sum of 1/frequency for each node in a row
+    def calculate_value_for_row(geometry, node_frequency):
+        total_value = 0
+        if geometry.geom_type == 'LineString':
+            nodes = list(geometry.coords)
+            for node in nodes:
+                if node in node_frequency:
+                    total_value += 1 / node_frequency[node]
+        return total_value
+    
+    # Apply the function to each row and store the result in a new column
+    df['value'] = df['geometry'].apply(lambda geom: calculate_value_for_row(geom, node_frequency))
+    
+    # Display the DataFrame with the new column
+    print(df[['line', 'value']])
     pass
 
 
@@ -204,7 +246,8 @@ def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
                                   tivdomcut=0,minxferpen=3,abscut=20,propcut=1.5,strict=True)
 
-
+if True:
+    calcPathSize()
 
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
                                                      pathcols=pathattrstobeused,
