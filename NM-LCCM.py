@@ -29,7 +29,7 @@ os.chdir(WPATH)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 #available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt'
-pathattrstobeused=['aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
+pathattrstobeused=['PS','aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
 
 #%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,strict=False):
@@ -114,37 +114,6 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     pathfilter2=pathfilter.loc[(pathfilter.counts>1)&(pathfilter.match>0)&(pathfilter.tway>0),:]
     dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]#.drop(columns=['spcost','compDiff','compProp'])
     print(f'{len(dfPath.sid.unique())} choice sets generated ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
-    ''' TP-NP pairing (deprecated after TRBAM 2025 Submission)
-    #pairing starts
-    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
-    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.tway==1,'sid'])]
-    dfCT=dfPath.loc[(dfPath.tway==1) & (dfPath.match==1),:] #chosen transitway
-    dfCT=dfCT.loc[dfCT.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
-    dfAN=dfPath.loc[(dfPath.sid.isin(dfCT.sid)) & (dfPath.tway==0) & (dfPath.match==0),:] #alternative nontransitway
-    dfAN=dfAN.loc[dfAN.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
-    dfCT=dfCT.loc[dfCT.sid.isin(dfAN.sid),:]
-    dfCN=dfPath.loc[(dfPath.tway==0) & (dfPath.match==1),:] #chosen nontransitway
-    dfCN=dfCN.loc[dfCN.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
-    dfAT=dfPath.loc[(dfPath.sid.isin(dfCN.sid)) & (dfPath.tway==1) & (dfPath.match==0),:] #alternative Transitway
-    dfAT=dfAT.loc[dfAT.groupby(['sid'])['cost'].rank(method='first')==1].reset_index(drop=True)
-    dfCN=dfCN.loc[dfCN.sid.isin(dfAT.sid),:]
-    dfPath=pd.concat([dfCT,dfAN,dfCN,dfAT]).sort_values(['sid','tway']).reset_index(drop=True)
-    dfPath=dfPath.loc[dfPath.sid.isin(np.union1d(np.intersect1d(dfCT.sid,dfAN.sid),np.intersect1d(dfCN.sid,dfAT.sid))),:]
-    if len(dfPath.sid.unique())*2 != len(dfPath):
-        raise Exception('Pairing Failed')
-    
-    pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
-    pathfilter.columns=['sid','tway','match','counts','mint','maxt']
-    if not all([all(pathfilter.tway==1),all(pathfilter.match==1),all(pathfilter.counts==2)]):
-        raise Exception('Pairing Failed')
-    pathfilter['compDiff']=pathfilter.maxt-pathfilter.mint
-    pathfilter['compProp']=pathfilter.maxt/pathfilter.mint
-    pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) | ((pathfilter.compProp<propcut))]
-    if strict: # from 'or' to 'and' condition when strict
-        pathfilter2=pathfilter.loc[(pathfilter.compDiff<abscut) & ((pathfilter.compProp<propcut))]
-    dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]
-    print(f'{len(dfPath.sid.unique())} paths paired ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
-    '''
     #Imputing activity duration
     dfSurvey=pd.merge(dfSurvey,dfPathRaw.loc[dfPathRaw.match==1,['sid','realDep']],left_on='id',right_on='sid')
     dfSurvey['duration']=dfSurvey.oppotime-dfSurvey.realDep/60
@@ -167,54 +136,38 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath['ov']=dfPath['aux']+dfPath['wt']
     #dfPath['iv']=-1*dfPath['iv']
     dfPath=dfPath.sort_values(['id','compProp']).reset_index(drop=True)
-    dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
-    dfMNL.to_csv('dfMNL.csv',index=False)
     return dfSurvey, dfPath
 
-def calcPathSize():
+
+
+def attachPS(df):
     import geopandas as gpd
     from shapely import wkt
-    # Sample pandas DataFrame containing WKT line geometries
-    df = pd.DataFrame({
-        'line': [
-            'LINESTRING (30 10, 10 30, 40 40)',  # Example WKT LineStrings
-            'LINESTRING (10 30, 40 40, 20 20)',
-            'LINESTRING (40 40, 50 50, 10 30)'
-        ]
-    })
-    
-    # Convert the WKT strings to shapely geometries using GeoPandas
+    #df=dfPath.loc[dfPath.id==78,:].copy() #for debugging
     df['geometry'] = df['line'].apply(wkt.loads)
-    
-    # Initialize an empty dictionary to store nodes and their frequency
-    node_frequency = {}
-    
-    # Populate the node frequency dictionary
-    for geom in df['geometry']:
-        if geom.geom_type == 'LineString':
-            nodes = list(geom.coords)
+    df['PS']=0.0
+    def calcPS(geometry, node_frequency):
+        PSin = 0
+        nodes = set(list(geometry.coords)[1:-1])
+        for node in nodes:
+            PSin += np.log(node_frequency[node])
+            PSin /= len(nodes)
+        return PSin
+    print('Calculating Path Size Factors')
+    for sid in df.id.unique():
+        dfi=df.loc[df.id==sid,['geometry','PS']].copy()
+        node_frequency = {}
+        for geom in dfi['geometry']:
+            nodes = set(list(geom.coords)[1:-1]) #remove O and D points
             for node in nodes:
                 if node in node_frequency:
                     node_frequency[node] += 1
                 else:
                     node_frequency[node] = 1
-    
-    # Function to calculate the sum of 1/frequency for each node in a row
-    def calculate_value_for_row(geometry, node_frequency):
-        total_value = 0
-        if geometry.geom_type == 'LineString':
-            nodes = list(geometry.coords)
-            for node in nodes:
-                if node in node_frequency:
-                    total_value += 1 / node_frequency[node]
-        return total_value
-    
-    # Apply the function to each row and store the result in a new column
-    df['value'] = df['geometry'].apply(lambda geom: calculate_value_for_row(geom, node_frequency))
-    
-    # Display the DataFrame with the new column
-    print(df[['line', 'value']])
-    pass
+        dfi['PS'] = dfi['geometry'].apply(lambda geom: calcPS(geom, node_frequency))
+        df.update(np.round(dfi.PS,6))
+    df=df.drop(columns=['line','geometry'])
+    return df
 
 
 def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
@@ -245,9 +198,13 @@ def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]
 
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
                                   tivdomcut=0,minxferpen=3,abscut=20,propcut=1.5,strict=True)
+dfPath=attachPS(dfPath)
 
-if True:
-    calcPathSize()
+if not os.path.isfile('dfMNL.csv'):
+    dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
+    dfMNL.to_csv('dfMNL.csv',index=False)
+    del dfMNL
+
 
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
                                                      pathcols=pathattrstobeused,

@@ -1,8 +1,57 @@
 setwd(dirname(rstudioapi::getSourceEditorContext()$path))
 library(dplyr) # but you have to load the packages for each R Session 
+library(tidyr)
 library(mlogit)
 library(ggplot2)
 library(ggpattern)
+
+selcols<-c("id","routes","match","tway","cost","iv","wt","aux","ov","nTrans","tt","PS",
+           "compProp","nwk","wk","ntiv","tiv")
+dfpair<-read.csv("dfMNL_TRBAug.csv",header=TRUE)
+dffree<-read.csv("dfMNL.csv",header=TRUE)
+
+dfpair<-dfpair %>% select(selcols) %>% mutate(datfrom="Paired (TRB)")
+dffree<-dffree %>% select(selcols) %>% mutate(datfrom="Freed (CASPT)")
+
+df<-rbind(dfpair,dffree)
+rm(dfpair,dffree,selcols)
+
+df<-df %>% group_by(id,datfrom) %>% mutate(matchiv=iv[match==1],matchov=ov[match==1],matchtt=tt[match==1],siv=min(iv),sov=min(ov)) %>% ungroup
+df<-df %>% mutate(ivdiffs=iv-siv,ovdiffs=ov-sov,IVTDiff=iv-matchiv,OVTDiff=ov-matchov,TTDiff=tt-matchtt)
+
+
+df$Matching<-as.factor(ifelse(df$match==1,"Matching","Alternative(s)"))
+
+ggplot(df,aes(x=Matching,y=compProp))+geom_violin()+
+    geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
+    ylab('Cost Proportion\nCompared to the Shortest Path')+facet_grid(.~datfrom)
+
+ggplot(df,aes(x=Matching,y=ivdiffs))+geom_violin()+
+    geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
+    ylab('IVT differences\nCompared to the Shortest IVP')+facet_grid(.~datfrom)
+
+ggplot(df,aes(x=Matching,y=ovdiffs))+geom_violin()+
+    geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
+    ylab('OVT differences\nCompared to the Shortest OVP')+facet_grid(.~datfrom)
+
+ggplot(df,aes(x=Matching,y=PS))+geom_violin()+
+    geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
+    ylab('Path Size Correction')+facet_grid(.~datfrom)
+
+
+df2<-df %>%filter(match==0) %>% select(id,datfrom,IVTDiff,OVTDiff,TTDiff) %>%  pivot_longer(cols=c(IVTDiff,OVTDiff,TTDiff),names_to="Type",values_to="time")
+
+
+ggplot(df2,aes(x=Type,y=time))+geom_violin()+
+    geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
+    ylab('Time differences\nCompared to the matching path')+facet_grid(.~datfrom)+geom_hline(yintercept=0)
+
+
+
+
+
+
+
 
 df<-read.csv("./Results/TRB1/dfMNL_ivadj.csv",header=TRUE)
 df$id<-as.character(df$id)
