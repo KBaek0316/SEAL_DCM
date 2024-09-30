@@ -32,7 +32,7 @@ print(device)
 pathattrstobeused=['PS','aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
 
 #%% Data Preprocessing
-def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,strict=False):
+def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,depcut=None,strict=False):
     '''for debugging
     surFile='survey'
     pathFile='paths'
@@ -44,6 +44,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     abscut=15
     propcut=1.5
     strict=False
+    depcut=15
     '''
     dfSurveyRaw=pd.read_csv(surFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
     dfConversion=pd.read_csv(convFile+r'.csv')
@@ -102,7 +103,11 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath['cost']=dfPath.tt+minxferpen*dfPath.nTrans
     dfPath['tway']=0
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
-    #After TRBAM 2025 Submission
+    ##After TRBAM 2025 Submission
+    if depcut is not None:#Departure time restriction
+        dfPath['matchDep']=dfPath.groupby('sid')['realDep'].transform(lambda x: x[dfPath['match'] == 1].values[0])
+        dfPath=dfPath.loc[(dfPath.matchDep-dfPath.realDep).abs()<=depcut,:]
+    #Discard 'pairing' used in TRBAM
     dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
     dfPath['compDiff']=dfPath.cost-dfPath.spcost
     dfPath['compProp']=dfPath.cost/dfPath.spcost
@@ -131,10 +136,9 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfSurvey['duration']=KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,np.where(dfSurvey.columns=='duration')[0][0]-1]
     #final organization
     dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:].reset_index(drop=True)
-    dfPath=dfPath.drop(columns=['ind','label_t','label_c']).rename(columns={"sid": "id"})
+    dfPath=dfPath.drop(columns=['ind','label_t','label_c','spcost','compDiff','matchDep'],errors='ignore').rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
     dfPath['ov']=dfPath['aux']+dfPath['wt']
-    #dfPath['iv']=-1*dfPath['iv']
     dfPath=dfPath.sort_values(['id','compProp']).reset_index(drop=True)
     return dfSurvey, dfPath
 
@@ -197,7 +201,8 @@ def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]
 
 
 dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
-                                  tivdomcut=0,minxferpen=3,abscut=20,propcut=1.5,strict=True)
+                                  tivdomcut=0,minxferpen=3,abscut=15,propcut=1.5,depcut=20,strict=True)
+
 dfPath=attachPS(dfPath)
 
 if not os.path.isfile('dfMNL.csv'):
