@@ -32,7 +32,7 @@ dfMNL['alt'] = dfMNL.groupby('id').cumcount() + 1
 maxalt=dfMNL.alt.max()
 
 def ppForBiogeme(dfM,attrcols=['iv','ov','nTrans','PS','tway','wt','aux']):
-    alts=[i+1 for i in range(maxalt)]
+    alts=np.arange(maxalt)+1
     comb = pd.MultiIndex.from_product([dfM['id'].unique(), alts], names=['id', 'alt'])
     dfLong = dfM.set_index(['id', 'alt']).reindex(comb, fill_value=0).reset_index()
     

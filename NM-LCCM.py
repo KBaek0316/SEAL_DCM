@@ -31,7 +31,7 @@ print(device)
 #available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt'
 pathattrstobeused=['PS','aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
 
-doPreprocess=False
+doPreprocess=True
 
 #%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,depcut=None,strict=False):
@@ -45,7 +45,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     minxferpen=5
     abscut=15
     propcut=1.5
-    strict=False
+    strict=True
     depcut=15
     '''
     dfSurveyRaw=pd.read_csv(surFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
@@ -107,14 +107,16 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
     ##After TRBAM 2025 Submission
     dfPath=dfPath.loc[dfPath.iv>0,:]
+    dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
     if depcut is not None:#Departure time restriction
-        dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
         dfPath['matchDep']=dfPath.groupby('sid')['realDep'].transform(lambda x: x[dfPath['match'] == 1].values[0])
         dfPath=dfPath.loc[(dfPath.matchDep-dfPath.realDep).abs()<=depcut,:]
-        dfPath['matchiv']=dfPath.groupby('sid')['iv'].transform(lambda x: x[dfPath['match'] == 1].values[0])
-        dfPath=dfPath.loc[(dfPath.matchiv-dfPath.iv)<abscut/2,:]
-        #dfPath['matchaux']=dfPath.groupby('sid')['aux'].transform(lambda x: x[dfPath['match'] == 1].values[0])
-        #dfPath=dfPath.loc[(dfPath.matchaux-dfPath.aux)<abscut,:]
+    #add reasonable choice set assumption for shorter-than-matching-path
+    dfPath['matchiv']=dfPath.groupby('sid')['iv'].transform(lambda x: x[dfPath['match'] == 1].values[0])
+    dfPath['matchtt']=dfPath.groupby('sid')['tt'].transform(lambda x: x[dfPath['match'] == 1].values[0])
+    dfPath['matchprop']=dfPath.matchiv/dfPath.matchtt
+    dfPath=dfPath.loc[~( (dfPath.tt<=dfPath.matchtt)&(dfPath.iv/dfPath.tt<dfPath.matchprop) ),:]
+    #dfPath=dfPath.loc[(dfPath.matchiv-dfPath.iv)<=abscut/2.5,:]
     #Discard 'pairing' used in TRBAM
     dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
     dfPath['compDiff']=dfPath.cost-dfPath.spcost
@@ -131,7 +133,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfSurvey=pd.merge(dfSurvey,dfPathRaw.loc[dfPathRaw.match==1,['sid','realDep']],left_on='id',right_on='sid')
     dfSurvey['duration']=dfSurvey.oppotime-dfSurvey.realDep/60
     dfSurvey=dfSurvey.drop_duplicates('id').drop(columns=['purO','purD','candrive','cdhvusdveh','oppotime','sid','realDep']).reset_index(drop=True)
-    print(dfSurvey.isnull().sum())
+    #print(dfSurvey.isnull().sum())
     catcols=['dayofweek','plan','access','egress','worktype','stu','choicerider','purpose']
     enc=OneHotEncoder(sparse_output=False)
     dfOnehot=pd.DataFrame( enc.fit_transform(dfSurvey[catcols]),columns=enc.get_feature_names_out())
@@ -141,7 +143,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     else:
         pass # only keep complete info?
     #hardcoding now...
-    dfSurvey['duration']=KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,np.where(dfSurvey.columns=='duration')[0][0]-1]
+    dfSurvey['duration']=KNNImputer(n_neighbors=10,weights='distance').fit_transform(dfSurvey.drop(columns='id'))[:,np.where(dfSurvey.columns=='duration')[0][0]-1]
     #final organization
     dfSurvey=dfSurvey.loc[dfSurvey.id.isin(pathfilter2.sid.unique()),:].reset_index(drop=True)
     dfPath=dfPath.drop(columns=['ind','label_t','label_c','spcost','compDiff','matchDep'],errors='ignore').rename(columns={"sid": "id"})
@@ -179,7 +181,22 @@ def attachPS(df):
     df=df.drop(columns=['line','geometry'])
     return df
 
+#doPreprocess=True
+if doPreprocess:
+    dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
+                                      tivdomcut=0,minxferpen=5,abscut=15,propcut=1.5,depcut=None,strict=True)
+    dfPath=attachPS(dfPath)
+    dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
+    dfMNL.to_csv('dfMNL.csv',index=False)
+    dfPath.to_csv('preprocessed.csv',index=False)
+    del dfMNL
+else:
+    dfPath=pd.read_csv('preprocessed.csv')
+dfPath['alt'] = dfPath.groupby('id').cumcount() + 1
 
+
+
+#%% tensors
 def genTensorsTRB(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
     '''
     pathcols=pathattrstobeused
@@ -207,25 +224,6 @@ def genTensorsTRB(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols
 
 def genTensors():
     pass
-
-'''for debugging
-doPreprocess=True
-'''
-
-
-if doPreprocess:
-    dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
-                                      tivdomcut=0,minxferpen=10,abscut=15,propcut=1.5,depcut=30,strict=True)
-    dfPath=attachPS(dfPath)
-    dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
-    dfMNL.to_csv('dfMNL.csv',index=False)
-    dfPath.to_csv('preprocessed.csv',index=False)
-    del dfMNL
-else:
-    dfPath=pd.read_csv('preprocessed.csv')
-dfPath['alt'] = dfPath.groupby('id').cumcount() + 1
-
-
 
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
                                                      pathcols=pathattrstobeused,
