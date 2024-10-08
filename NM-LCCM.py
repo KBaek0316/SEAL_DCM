@@ -31,6 +31,8 @@ print(device)
 #available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt'
 pathattrstobeused=['PS','aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
 
+doPreprocess=False
+
 #%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,depcut=None,strict=False):
     '''for debugging
@@ -104,9 +106,15 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath['tway']=0
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
     ##After TRBAM 2025 Submission
+    dfPath=dfPath.loc[dfPath.iv>0,:]
     if depcut is not None:#Departure time restriction
+        dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
         dfPath['matchDep']=dfPath.groupby('sid')['realDep'].transform(lambda x: x[dfPath['match'] == 1].values[0])
         dfPath=dfPath.loc[(dfPath.matchDep-dfPath.realDep).abs()<=depcut,:]
+        dfPath['matchiv']=dfPath.groupby('sid')['iv'].transform(lambda x: x[dfPath['match'] == 1].values[0])
+        dfPath=dfPath.loc[(dfPath.matchiv-dfPath.iv)<abscut/2,:]
+        #dfPath['matchaux']=dfPath.groupby('sid')['aux'].transform(lambda x: x[dfPath['match'] == 1].values[0])
+        #dfPath=dfPath.loc[(dfPath.matchaux-dfPath.aux)<abscut,:]
     #Discard 'pairing' used in TRBAM
     dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
     dfPath['compDiff']=dfPath.cost-dfPath.spcost
@@ -116,7 +124,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
         dfPath=dfPath.loc[(dfPath.compDiff<abscut)&(dfPath.compProp<propcut),:]
     pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
     pathfilter.columns=['sid','tway','match','counts','mint','maxt']
-    pathfilter2=pathfilter.loc[(pathfilter.counts>1)&(pathfilter.match>0)&(pathfilter.tway>0),:]
+    pathfilter2=pathfilter.loc[(pathfilter.counts>1)&(pathfilter.match>0)& (pathfilter.tway>0),:] # 
     dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]#.drop(columns=['spcost','compDiff','compProp'])
     print(f'{len(dfPath.sid.unique())} choice sets generated ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     #Imputing activity duration
@@ -141,8 +149,6 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     dfPath['ov']=dfPath['aux']+dfPath['wt']
     dfPath=dfPath.sort_values(['id','compProp']).reset_index(drop=True)
     return dfSurvey, dfPath
-
-
 
 def attachPS(df):
     import geopandas as gpd
@@ -174,7 +180,7 @@ def attachPS(df):
     return df
 
 
-def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
+def genTensorsTRB(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
     '''
     pathcols=pathattrstobeused
     dropcols=['duration']
@@ -199,16 +205,26 @@ def genTensors(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]
     ch=torch.tensor(dfMain.iloc[:,chloc].to_numpy(),dtype=torch.float32).to(device)
     return seg, nume, ch, dfMain
 
+def genTensors():
+    pass
 
-dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
-                                  tivdomcut=0,minxferpen=3,abscut=15,propcut=1.5,depcut=20,strict=True)
+'''for debugging
+doPreprocess=True
+'''
 
-dfPath=attachPS(dfPath)
 
-if not os.path.isfile('dfMNL.csv'):
+if doPreprocess:
+    dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
+                                      tivdomcut=0,minxferpen=10,abscut=15,propcut=1.5,depcut=30,strict=True)
+    dfPath=attachPS(dfPath)
     dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
     dfMNL.to_csv('dfMNL.csv',index=False)
+    dfPath.to_csv('preprocessed.csv',index=False)
     del dfMNL
+else:
+    dfPath=pd.read_csv('preprocessed.csv')
+dfPath['alt'] = dfPath.groupby('id').cumcount() + 1
+
 
 
 segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
@@ -243,10 +259,10 @@ class CombinedModel(nn.Module):
         latent_classes = self.latent_class_nn(segmentation_bases)
         batch_size = numeric_attrs.size(0)
         numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
-        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1)
+        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
         # Separate intercept and non-intercept beta values
-        beta_free = beta_expanded[:, :, :-2] #dim: nobs * nclass * cols
-        beta_const = beta_expanded[:, :, -2:] #dim: nobs * nclass * cols
+        beta_free = beta_expanded[:, :, :-2] #dim: nobs * nclass * varcols
+        beta_const = beta_expanded[:, :, -2:] #dim: nobs * nclass * varcols
         # Apply negative ReLU to enforce non-positive betas
         if self.negBeta:
             beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)

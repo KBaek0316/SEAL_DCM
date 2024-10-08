@@ -10,6 +10,11 @@ selcols<-c("id","routes","match","tway","cost","iv","wt","aux","ov","nTrans","tt
 dfpair<-read.csv("dfMNL_TRBAug.csv",header=TRUE)
 dffree<-read.csv("dfMNL.csv",header=TRUE)
 
+if (!("PS" %in% colnames(dffree))){
+    dffree$PS<-0
+}
+
+
 dfpair<-dfpair %>% select(selcols) %>% mutate(datfrom="Paired (TRB)")
 dffree<-dffree %>% select(selcols) %>% mutate(datfrom="Freed (CASPT)")
 
@@ -40,16 +45,14 @@ ggplot(df,aes(x=Matching,y=PS))+geom_violin()+
 
 
 df2<-df %>%filter(match==0) %>% select(id,datfrom,IVTDiff,OVTDiff,TTDiff) %>%  pivot_longer(cols=c(IVTDiff,OVTDiff,TTDiff),names_to="Type",values_to="time")
-
+summary(df[df$datfrom=="Freed (CASPT)","IVTDiff"])
+summary(df[df$datfrom=="Freed (CASPT)","OVTDiff"])
 
 ggplot(df2,aes(x=Type,y=time))+geom_violin()+
     geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
     ylab('Time differences\nCompared to the matching path')+facet_grid(.~datfrom)+geom_hline(yintercept=0)
 
-
-
-
-
+######################
 
 
 
