@@ -31,7 +31,7 @@ if dfMNL.iv.min()<=0:
 dfMNL['alt'] = dfMNL.groupby('id').cumcount() + 1
 maxalt=dfMNL.alt.max()
 
-def ppForBiogeme(dfM,attrcols=['iv','ov','nTrans','PS','tway','wt','aux']):
+def ppForBiogeme(dfM,attrcols=['iv','ov','nTrans','PS','tway','wt','aux','wk','nwk']):
     alts=np.arange(maxalt)+1
     comb = pd.MultiIndex.from_product([dfM['id'].unique(), alts], names=['id', 'alt'])
     dfLong = dfM.set_index(['id', 'alt']).reindex(comb, fill_value=0).reset_index()
@@ -61,9 +61,11 @@ BETA_OV = Beta('BETA_OV', 0, None, None, 0)
 BETA_NTRANS = Beta('BETA_NTRANS', 0, None,None, 0)
 BETA_PS = Beta('BETA_PS', 0, None, None, 0)
 BETA_TWAY = Beta('BETA_TWAY', 0, None, None, 0)
+BETA_WK = Beta('BETA_WK', 0, None, None, 0)
+BETA_NWK = Beta('BETA_NWK', 0, None, None, 0)
 
-
-V = {}
+V1 = {}
+V2 = {}
 av = {}
 
 for i in range(1, maxalt + 1):
@@ -75,9 +77,13 @@ for i in range(1, maxalt + 1):
     nTrans = Variable(f'nTrans_{i}')
     PS = Variable(f'PS_{i}')
     tway=  Variable(f'tway_{i}')
+    wk=  Variable(f'wk_{i}')
+    nwk=  Variable(f'nwk_{i}')
     # Define utility function for alternative i
-    #V[i] = BETA_IV * iv + BETA_WT * wt + BETA_AUX * aux + BETA_NTRANS * nTrans + BETA_PS * PS + BETA_TWAY * tway
-    V[i] = BETA_IV * iv + BETA_OV * ov + BETA_NTRANS * nTrans + BETA_PS * PS + BETA_TWAY * tway
+    V1[i] = BETA_IV * iv + BETA_WK * wk  + BETA_NWK * nwk  + BETA_WT * wt + BETA_NTRANS * nTrans + BETA_PS * PS + BETA_TWAY * tway #full
+    #V[i] = BETA_IV * iv + BETA_WT * wt + BETA_AUX * aux + BETA_NTRANS * nTrans + BETA_PS * PS + BETA_TWAY * tway     #aux
+    #V[i] = BETA_IV * iv + BETA_AUX * aux + BETA_NTRANS * nTrans + BETA_PS * PS + BETA_TWAY * tway    #no wt
+    V2[i] = BETA_IV * iv + BETA_OV * ov + BETA_NTRANS * nTrans + BETA_PS * PS + BETA_TWAY * tway # consolidate to ov
     # Define availability for alternative i (e.g., avail_1, avail_2, ..., avail_5)
     av[i] = Variable(f'avail_{i}')
 
@@ -86,13 +92,18 @@ choice = Variable('choice')
 
 
 # Logit model: loglogit(V, av, chosen)
-logprob = loglogit(V, av, choice)
-
+logprob1 = loglogit(V1, av, choice)
+logprob2 = loglogit(V2, av, choice)
 # Define the likelihood function
-biogeme_model = bio.BIOGEME(database, logprob)
+biogeme_model1 = bio.BIOGEME(database, logprob1)
+biogeme_model2 = bio.BIOGEME(database, logprob2)
 
 # Estimate the model
-results = biogeme_model.estimate()
+results = biogeme_model1.estimate()
 print(results.get_estimated_parameters())
+
+# Estimate the model
+#results = biogeme_model2.estimate()
+#print(results.get_estimated_parameters())
 
 

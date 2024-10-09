@@ -31,19 +31,19 @@ print(device)
 #available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt'
 pathattrstobeused=['PS','aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
 
-doPreprocess=True
+doPreprocess=False
 
 #%% Data Preprocessing
-def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,minxferpen=3,abscut=15,propcut=1.5,depcut=None,strict=False):
+def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=None,strict=True):
     '''for debugging
     surFile='survey'
     pathFile='paths'
     ver=2022
     convFile='dfConv'
     imputeCols=['duration']
-    tivdomcut=0.5
-    minxferpen=5
-    abscut=15
+    tivdomcut=0.2
+    minxferpen=3
+    abscut=20
     propcut=1.5
     strict=True
     depcut=15
@@ -96,13 +96,13 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     #move on to the path preprocessing; paths retrieved from the repository SchBasedSPwithTE_Pandas
     dfPathRaw=pd.read_csv(pathFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
     print('Among '+str(len(dfPathRaw.sid.unique()))+' survey respondents examined,')
-    dfPath=dfPathRaw.drop(columns=['detail','cost','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
+    dfPath=dfPathRaw.drop(columns=['detail','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
     print(str(len(dfPath.sid.unique()))+' respondents have at least one path identified from V-SBSP')
     dfPath['ntiv']=dfPath['iv']-dfPath['tiv'] #non-transitway IVT
     dfPath['aux']=dfPath['wk']+dfPath['nwk'] #access and egress time combined
     dfPath['ov']=dfPath['aux']+dfPath['wt'] #out-of-vehicle time
     dfPath['tt']=dfPath.iv+dfPath.ov
-    dfPath['cost']=dfPath.tt+minxferpen*dfPath.nTrans
+    dfPath['cost']=dfPath.tt+minxferpen*dfPath.nTrans #tiebreaker
     dfPath['tway']=0
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
     ##After TRBAM 2025 Submission
@@ -111,12 +111,12 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
     if depcut is not None:#Departure time restriction
         dfPath['matchDep']=dfPath.groupby('sid')['realDep'].transform(lambda x: x[dfPath['match'] == 1].values[0])
         dfPath=dfPath.loc[(dfPath.matchDep-dfPath.realDep).abs()<=depcut,:]
-    #add reasonable choice set assumption for shorter-than-matching-path
+    #add reasonable choice set assumption for shorter-than-matching-path: exclude dominant non-chosen paths
     dfPath['matchiv']=dfPath.groupby('sid')['iv'].transform(lambda x: x[dfPath['match'] == 1].values[0])
     dfPath['matchtt']=dfPath.groupby('sid')['tt'].transform(lambda x: x[dfPath['match'] == 1].values[0])
+    dfPath['matchxf']=dfPath.groupby('sid')['nTrans'].transform(lambda x: x[dfPath['match'] == 1].values[0])
     dfPath['matchprop']=dfPath.matchiv/dfPath.matchtt
     dfPath=dfPath.loc[~( (dfPath.tt<=dfPath.matchtt)&(dfPath.iv/dfPath.tt<dfPath.matchprop) ),:]
-    #dfPath=dfPath.loc[(dfPath.matchiv-dfPath.iv)<=abscut/2.5,:]
     #Discard 'pairing' used in TRBAM
     dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
     dfPath['compDiff']=dfPath.cost-dfPath.spcost
@@ -126,7 +126,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0.5,mi
         dfPath=dfPath.loc[(dfPath.compDiff<abscut)&(dfPath.compProp<propcut),:]
     pathfilter=dfPath.groupby('sid').agg({'tway':'sum','match':'sum','cost':['count','min','max']}).reset_index()
     pathfilter.columns=['sid','tway','match','counts','mint','maxt']
-    pathfilter2=pathfilter.loc[(pathfilter.counts>1)&(pathfilter.match>0)& (pathfilter.tway>0),:] # 
+    pathfilter2=pathfilter.loc[(pathfilter.counts>1)&(pathfilter.match>0)  ,:] #   &(pathfilter.tway>0)
     dfPath=dfPath.loc[dfPath.sid.isin(pathfilter2.sid.unique()),:]#.drop(columns=['spcost','compDiff','compProp'])
     print(f'{len(dfPath.sid.unique())} choice sets generated ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     #Imputing activity duration
@@ -179,12 +179,13 @@ def attachPS(df):
         dfi['PS'] = dfi['geometry'].apply(lambda geom: calcPS(geom, node_frequency))
         df.update(np.round(dfi.PS,6))
     df=df.drop(columns=['line','geometry'])
+    print('Path Size Correction Term has been calculated')
     return df
 
 #doPreprocess=True
 if doPreprocess:
     dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
-                                      tivdomcut=0,minxferpen=5,abscut=15,propcut=1.5,depcut=None,strict=True)
+                                      tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=45,strict=True)
     dfPath=attachPS(dfPath)
     dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
     dfMNL.to_csv('dfMNL.csv',index=False)

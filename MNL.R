@@ -41,7 +41,7 @@ ggplot(df,aes(x=Matching,y=ovdiffs))+geom_violin()+
 
 ggplot(df,aes(x=Matching,y=PS))+geom_violin()+
     geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
-    ylab('Path Size Correction')+facet_grid(.~datfrom)
+    scale_y_continuous(limits = c(0, 0.5))+ylab('Path Size Correction')+facet_grid(.~datfrom)
 
 
 df2<-df %>%filter(match==0) %>% select(id,datfrom,IVTDiff,OVTDiff,TTDiff) %>%  pivot_longer(cols=c(IVTDiff,OVTDiff,TTDiff),names_to="Type",values_to="time")
