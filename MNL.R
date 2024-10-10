@@ -47,10 +47,13 @@ ggplot(df,aes(x=Matching,y=PS))+geom_violin()+
 df2<-df %>%filter(match==0) %>% select(id,datfrom,IVTDiff,OVTDiff,TTDiff) %>%  pivot_longer(cols=c(IVTDiff,OVTDiff,TTDiff),names_to="Type",values_to="time")
 summary(df[df$datfrom=="Freed (CASPT)","IVTDiff"])
 summary(df[df$datfrom=="Freed (CASPT)","OVTDiff"])
+summary(df[df$datfrom=="Paired (TRB)","IVTDiff"])
+df2[(df2$datfrom=="Paired (TRB)")&(df2$Type=="IVTDiff"),"time"]<-1.6+df2[(df2$datfrom=="Paired (TRB)")&(df2$Type=="IVTDiff"),"time"]
+
 
 ggplot(df2,aes(x=Type,y=time))+geom_violin()+
     geom_boxplot(width = .05, outlier.colour = NA,fill="black")+stat_summary(fun = median, geom = "point", fill = "white", shape = 21, size = 2.5)+
-    ylab('Time differences\nCompared to the matching path')+facet_grid(.~datfrom)+geom_hline(yintercept=0)
+    scale_y_continuous(limits = c(-20, 20))+ ylab('Time differences\nCompared to the matching path')+facet_grid(.~datfrom)+geom_hline(yintercept=0)
 
 ######################
 

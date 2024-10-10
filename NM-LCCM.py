@@ -28,8 +28,8 @@ os.chdir(WPATH)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
-#available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt'
-pathattrstobeused=['PS','aux','wt','iv','nTrans'] #the last two should be iv and ntrans for desired model eval
+#available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt','PS'
+attrsUsed=['PS','tway','nTrans','wk','nwk','wt','iv'] #the last two should be iv and ntrans for desired model eval
 
 doPreprocess=False
 
@@ -149,7 +149,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minx
     dfPath=dfPath.drop(columns=['ind','label_t','label_c','spcost','compDiff','matchDep'],errors='ignore').rename(columns={"sid": "id"})
     dfPath['aux']=dfPath['wk']+dfPath['nwk']
     dfPath['ov']=dfPath['aux']+dfPath['wt']
-    dfPath=dfPath.sort_values(['id','compProp']).reset_index(drop=True)
+    dfPath=dfPath.sort_values(['id','match']).reset_index(drop=True)
     return dfSurvey, dfPath
 
 def attachPS(df):
@@ -182,54 +182,63 @@ def attachPS(df):
     print('Path Size Correction Term has been calculated')
     return df
 
-#doPreprocess=True
+def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[]):
+    '''
+    pathcols=attrsUsed
+    dropcols=['duration']
+    stdcols=['age', 'income', 'duration']
+    '''
+    #setup
+    PathSurvCut=np.where(dfPP.columns=='alt')[0][0]
+    maxalt=dfPP.alt.max()
+    #segmentation bases
+    dfS=dfPP.iloc[:,PathSurvCut:].copy()
+    dfS['id'] = dfPP['id'] #not need, but kept for debugging-inspection
+    dfS=dfS.loc[dfS.alt==0,:]
+    #final survey preprocessing with standardization
+    if len(stdcols)>0:
+        scaler=StandardScaler()
+        stdized=pd.DataFrame(scaler.fit_transform(dfS[stdcols]),columns=stdcols)
+        dfS.update(stdized)
+    dfS=dfS.drop(columns=np.append(['alt'],dropcols)).set_index('id')
+    seg=torch.tensor(dfS.to_numpy(),dtype=torch.float32).to(device)
+    #numerical attributes; only difference matters and alt0 is never a chosen path by dfPath.sort_values(['id','match']) per definition
+    dfX=dfPP.iloc[:,:PathSurvCut+1].copy()
+    dfX=dfX.loc[:,np.append(['id','alt','match'],pathcols)]
+    dfX2=dfX[dfX.alt==0].drop(columns=['alt','match'])
+    dfXD=pd.merge(dfX, dfX2, on='id', suffixes=('_main', '_aux'))
+    for attr in pathcols:  #calc difference
+        dfXD[attr] = dfXD[f'{attr}_main'] - dfXD[f'{attr}_aux']
+    dfXD=dfXD.loc[dfXD.alt!=0,dfX.columns]
+    grouped=dfXD.groupby('id')
+    numlist=grouped[pathcols].apply(lambda x: x.values.tolist()).tolist()
+    nums=torch.nn.utils.rnn.pad_sequence([torch.tensor(a,dtype=torch.float32) for a in numlist], batch_first=True, padding_value=0).to(device)
+    choices = (grouped.apply(lambda x: np.argmax(x['match'].values),include_groups=False)+1).tolist()
+    choices=torch.tensor(choices, dtype=torch.long).to(device)
+    validAlt = grouped['alt'].apply(lambda x: [1] * len(x) + [0] * (maxalt - len(x)), include_groups=False).tolist()
+    validAlt = torch.tensor(validAlt, dtype=torch.float32)
+    dfIn=pd.merge(dfXD,dfS,on='id')
+    return seg, nums, choices, validAlt,dfIn
+
 if doPreprocess:
     dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
                                       tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=45,strict=True)
     dfPath=attachPS(dfPath)
-    dfMNL=pd.merge(dfPath,dfSurvey,how='left',on='id')
-    dfMNL.to_csv('dfMNL.csv',index=False)
-    dfPath.to_csv('preprocessed.csv',index=False)
-    del dfMNL
+    dfPath['alt'] = dfPath.groupby('id').cumcount()
+    dfPP=pd.merge(dfPath,dfSurvey,how='left',on='id')
+    dfPP.to_csv('dfPP.csv',index=False)
+    del dfPath, dfSurvey
 else:
-    dfPath=pd.read_csv('preprocessed.csv')
-dfPath['alt'] = dfPath.groupby('id').cumcount() + 1
+    dfPP=pd.read_csv('dfPP.csv')
+#dfPath=dfPP.copy()
 
 
-
-#%% tensors
-def genTensorsTRB(dfSurvey,dfPath,pathcols=pathattrstobeused,dropcols=[],stdcols=[]):
-    '''
-    pathcols=pathattrstobeused
-    dropcols=['duration']
-    stdcols=['age', 'income', 'duration']
-    '''
-    #dfMain: Tway paths #dfSub: nonTway paths
-    dfMain=dfPath.loc[dfPath.tway==1,np.append(['id','match'],pathcols)]
-    dfSub=dfPath.loc[dfPath.tway==0,np.append(['id','match'],pathcols)]
-    if not np.all(dfMain.id.values==dfSub.id.values):
-        raise Exception('organize dfPath or recheck the pairing steps')
-    dfMain.iloc[:,2:]=dfMain.iloc[:,2:].to_numpy()-dfSub.iloc[:,2:].to_numpy() #tway - nontway
-    #final survey preprocessing with standardization
-    dfSurvey2=dfSurvey.drop(columns=dropcols).copy()
-    if len(stdcols)>0:
-        scaler=StandardScaler()
-        stdized=pd.DataFrame(scaler.fit_transform(dfSurvey[stdcols]),columns=stdcols)
-        dfSurvey2.update(stdized)
-    dfMain=pd.merge(dfSurvey2,dfMain,on='id') #now it is tway-non matrix and match==1 means chose tway
-    chloc=np.where(dfMain.columns=='match')[0][0] #col index of the column match
-    seg=torch.tensor(dfMain.iloc[:,1:chloc].to_numpy(),dtype=torch.float32).to(device)
-    nume=torch.tensor(dfMain.iloc[:,(chloc+1):].to_numpy(),dtype=torch.float32).to(device)
-    ch=torch.tensor(dfMain.iloc[:,chloc].to_numpy(),dtype=torch.float32).to(device)
-    return seg, nume, ch, dfMain
-
-def genTensors():
-    pass
-
-segmentation_bases, numeric_attrs, y, dfIn=genTensors(dfSurvey,dfPath,
-                                                     pathcols=pathattrstobeused,
+seg, nums, y, mask, dfIn=genTensors(dfPP,
+                                                     pathcols=attrsUsed,
                                                      dropcols=['duration'],
                                                      stdcols=['age', 'income', 'duration'])
+
+
 #%% Model Definition
 # Define the neural network model with latent classes
 class LatentClassNN(nn.Module):
@@ -246,6 +255,37 @@ class LatentClassNN(nn.Module):
         x = F.relu(self.layer3(x))
         x = F.softmax(self.layero(x), dim=1)
         return x
+
+class NNLCCM(nn.Module):
+    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta=0,max_alts=5):
+        super(CombinedModel, self).__init__()
+        self.latent_class_nn = LatentClassNN(segmentation_input_size, nnodes, num_classes)
+        self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
+        self.negBeta=negBeta
+
+    def forward(self, segmentation_bases, numeric_attrs):
+        latent_classes = self.latent_class_nn(segmentation_bases)
+        batch_size = numeric_attrs.size(0)
+        numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
+        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
+        # Separate intercept and non-intercept beta values
+        beta_free = beta_expanded[:, :, :-1*(self.negBeta)] #dim: nobs * nclass * varcols
+        beta_const = beta_expanded[:, :, -1*(self.negBeta):] #dim: nobs * nclass * varcols
+        # Apply negative ReLU to enforce non-positive betas
+        if self.negBeta>0:
+            beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
+        # Concatenate intercepts and transformed non-intercepts
+        beta_expanded = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
+        # Compute logits for each class
+        logits = torch.bmm(numeric_attrs_with_intercept.unsqueeze(1), beta_expanded.permute(0, 2, 1)).squeeze(1)
+        # Aggregate class probabilities for the final output probability of y=1
+        final_probabilities = torch.sum(latent_classes * torch.sigmoid(logits), dim=1)
+        final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
+        return final_probabilities, latent_classes
+    def nonPosConst(self):
+        return self.negBeta
+
+
 
 class CombinedModel(nn.Module):
     def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta):
