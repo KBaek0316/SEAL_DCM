@@ -11,14 +11,16 @@ import torch.optim as optim
 
 # Configuration
 batch_size = 1000
-num_alternatives = 3  # We will use 3 alternatives
-num_attributes = 4    # Each alternative has 4 attributes
+num_alternatives = 3
+num_attributes = 4
 
 # Sample data for all J alternatives: (batch_size, num_alternatives, num_attributes)
-X = torch.randn(batch_size, num_alternatives, num_attributes)
-
-# Observed choices (ground truth labels): (batch_size,), where each entry is the index of the chosen alternative
-y = torch.randint(0, num_alternatives, (batch_size,))
+Z = torch.randn(batch_size, num_alternatives, num_attributes) #std random
+X = 10 + 3 * Z
+beta = torch.randn(num_attributes)
+eps = 3 * torch.randn(batch_size, num_alternatives)  # Noise with mean 0 and std 3
+utils = torch.matmul(X, beta) + eps
+y = torch.argmax(utils, dim=1)  # Chosen alternative for each agent (shape: batch_size)
 
 
 #%% Model 1: All J alternatives (absolute attributes)
@@ -162,31 +164,21 @@ dfPP=ppForBiogeme(dfLong)
 
 database = Database('mymodel',dfPP)
 
-# Define the variables for the attributes (attr_0, attr_1, ..., attr_3)
-attr0 = Variable('attr0')
-attr1 = Variable('attr1')
-attr2 = Variable('attr2')
-attr3 = Variable('attr3')
-
 # Define the choice variable
 chosen = Variable('chosen')
 
-# Define the parameters (Betas) to be estimated
-BETA_0 = Beta('BETA_0', 0, None, None, 0)
-BETA_1 = Beta('BETA_1', 0, None, None, 0)
-BETA_2 = Beta('BETA_2', 0, None, None, 0)
-BETA_3 = Beta('BETA_3', 0, None, None, 0)
+# Define betas for the attributes
+betas = [Beta(f'BETA_{k}', 0.1, None, None, 0) for k in range(num_attributes)]
 
-# Define the utility function for each alternative (U_j = BETA_0 * attr_0 + BETA_1 * attr_1 + ...)
-V = {}
-for i in range(1, num_alternatives + 1):
-    # Define variables for each alternative dynamically
-    attr0 = Variable(f'attr0_{i}')
-    attr1 = Variable(f'attr1_{i}')
-    attr2 = Variable(f'attr2_{i}')
-    attr3 = Variable(f'attr3_{i}')
-    # Define utility function for alternative i
-    V[i]= BETA_0 * attr0 + BETA_1 * attr1 + BETA_2 * attr2 + BETA_3 * attr3
+# Use a for loop to build the utility function
+V={}
+for i in range(1,num_alternatives + 1): #for each alts
+    V[i]=0
+    for k in range(num_attributes): #sum each attrs' utility contributions
+        attrs = [Variable(f'attr{k}_{i}') for k in range(num_attributes)]
+        V[i] += attrs[k] * betas[k]
+
+
 
 
 # Define the logit model (with no availability restrictions)
