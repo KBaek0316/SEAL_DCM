@@ -213,10 +213,10 @@ def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[]):
     grouped=dfXD.groupby('id')
     numlist=grouped[pathcols].apply(lambda x: x.values.tolist()).tolist()
     nums=torch.nn.utils.rnn.pad_sequence([torch.tensor(a,dtype=torch.float32) for a in numlist], batch_first=True, padding_value=0).to(device)
-    choices = (grouped.apply(lambda x: np.argmax(x['match'].values),include_groups=False)+1).tolist()
+    choices = (grouped.apply(lambda x: np.argmax(x['match'].values),include_groups=False)).tolist() #pytorch accepts 0-starting indices
     choices=torch.tensor(choices, dtype=torch.long).to(device)
     validAlt = grouped['alt'].apply(lambda x: [1] * len(x) + [0] * (maxalt - len(x)), include_groups=False).tolist()
-    validAlt = torch.tensor(validAlt, dtype=torch.float32)
+    validAlt = torch.tensor(validAlt, dtype=torch.float32).to(device)
     dfIn=pd.merge(dfXD,dfS,on='id')
     return seg, nums, choices, validAlt,dfIn
 
@@ -241,56 +241,60 @@ seg, nums, y, mask, dfIn=genTensors(dfPP,
 
 #%% Model Definition
 # Define the neural network model with latent classes
-class LatentClassNN(nn.Module):
+class MembershipModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes):
-        super(LatentClassNN, self).__init__()
+        super(MembershipModel, self).__init__()
         self.layer1 = nn.Linear(input_size, hidden_size)
-        self.layer2 = nn.Linear(hidden_size, 2*hidden_size)
-        self.layer3 = nn.Linear(2*hidden_size, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, hidden_size)
         self.layero = nn.Linear(hidden_size, num_classes)
-
     def forward(self, x):
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
-        x = F.relu(self.layer3(x))
         x = F.softmax(self.layero(x), dim=1)
         return x
 
-class NNLCCM(nn.Module):
-    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta=0,max_alts=5):
-        super(CombinedModel, self).__init__()
-        self.latent_class_nn = LatentClassNN(segmentation_input_size, nnodes, num_classes)
-        self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
-        self.negBeta=negBeta
+class Embedding(nn.Module):
+    def __init__(self):
+        super(Embedding, self).__init__()
+        pass
+    def forward(self):
+        return 0
 
-    def forward(self, segmentation_bases, numeric_attrs):
-        latent_classes = self.latent_class_nn(segmentation_bases)
-        batch_size = numeric_attrs.size(0)
-        numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
-        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
+class SEAL_DCM(nn.Module):
+    def __init__(self, segSize, nClasses, numSize,nnodes,intcpt=True,negBeta=0,max_alts=5):
+        super(SEAL_DCM, self).__init__()
+        self.latent_class_nn = MembershipModel(segSize, nnodes, nClasses)
+        if intcpt:
+            self.beta = nn.Parameter(torch.randn(nClasses, numSize + 1))  # Including intercept
+        else:
+            self.beta = nn.Parameter(torch.randn(nClasses, numSize))  # Not including intercept
+        self.negBeta=negBeta
+        self.intcpt=intcpt
+    def forward(self, seg,nums,mask):
+        latent_classes = self.latent_class_nn(seg)
+        batch_size = nums.size(0)
+        if self.intcpt:
+            nums = torch.cat([torch.ones(batch_size, 1).to(device), nums], dim=1)
+            beta = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
         # Separate intercept and non-intercept beta values
-        beta_free = beta_expanded[:, :, :-1*(self.negBeta)] #dim: nobs * nclass * varcols
-        beta_const = beta_expanded[:, :, -1*(self.negBeta):] #dim: nobs * nclass * varcols
-        # Apply negative ReLU to enforce non-positive betas
-        if self.negBeta>0:
+        if self.negBeta>0: # Apply negative ReLU to enforce non-positive estimates for last negBeta coefficients
+            beta_free = beta[:, :, :-1*(self.negBeta)] #dim: nobs * nclass * varcols
+            beta_const = beta[:, :, -1*(self.negBeta):] #dim: nobs * nclass * varcols
             beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
-        # Concatenate intercepts and transformed non-intercepts
-        beta_expanded = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
-        # Compute logits for each class
-        logits = torch.bmm(numeric_attrs_with_intercept.unsqueeze(1), beta_expanded.permute(0, 2, 1)).squeeze(1)
+            beta = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
+        # Compute logits for each class: batch x alternatives x classes
+        logits = torch.bmm(nums, beta.permute(0, 2, 1)) #[nobs nalts nseg] * [nobs nalts nclass]
+        logits_masked=logits*mask.unsqueeze(-1)
+        alt_class_probs=torch.sigmoid(logits_masked)
         # Aggregate class probabilities for the final output probability of y=1
-        final_probabilities = torch.sum(latent_classes * torch.sigmoid(logits), dim=1)
-        final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
-        return final_probabilities, latent_classes
-    def nonPosConst(self):
-        return self.negBeta
+        final_prob = torch.sum(latent_classes.unsqueeze(1) * alt_class_probs, dim=2)
+        final_prob = torch.clamp(final_prob, 1e-7, 1 - 1e-7) #avoid log(0)
+        return final_prob, latent_classes
 
-
-
-class CombinedModel(nn.Module):
+class NNLCCM(nn.Module): #deprecated
     def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta):
-        super(CombinedModel, self).__init__()
-        self.latent_class_nn = LatentClassNN(segmentation_input_size, nnodes, num_classes)
+        super(NNLCCM, self).__init__()
+        self.latent_class_nn = MembershipModel(segmentation_input_size, nnodes, num_classes)
         self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
         self.negBeta=negBeta
 
@@ -298,10 +302,10 @@ class CombinedModel(nn.Module):
         latent_classes = self.latent_class_nn(segmentation_bases)
         batch_size = numeric_attrs.size(0)
         numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
-        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
+        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1)
         # Separate intercept and non-intercept beta values
-        beta_free = beta_expanded[:, :, :-2] #dim: nobs * nclass * varcols
-        beta_const = beta_expanded[:, :, -2:] #dim: nobs * nclass * varcols
+        beta_free = beta_expanded[:, :, :-2] #dim: nobs * nclass * cols
+        beta_const = beta_expanded[:, :, -2:] #dim: nobs * nclass * cols
         # Apply negative ReLU to enforce non-positive betas
         if self.negBeta:
             beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
@@ -317,9 +321,10 @@ class CombinedModel(nn.Module):
         return self.negBeta
 
 
+
 # Training function
-def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,
-                max_norm=2,nclass=2,nnodes=64,nepoch=300,lrate=0.05,l2=0.005):
+def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,nclass=2,
+                max_norm=2,nnodes=32,nepoch=300,lrate=0.05,l2=0.005,wDecay=1e-5):
     '''
     seg=segmentation_bases
     nume=numeric_attrs
@@ -333,6 +338,7 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,
     max_norm=1
     testVal=True
     rho0=True
+    wDecay=1e-5
     '''
     #setup
     if testVal:
@@ -347,9 +353,10 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,
     nume_tr=nume[tr]
     y_tr=y[tr]
     tr_losses = []  # List to store training loss values
-    model = CombinedModel(seg_tr.shape[1], nclass, nume_tr.shape[1],nnodes,negBeta=negConst).to(device)
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lrate)
+    model = SEAL_DCM(seg_tr.shape[1], nclass, nume_tr.shape[1],nnodes,negBeta=negConst).to(device)
+    
+    optimizer = optim.Adam(model.parameters(), lr=lrate,weight_decay=wDecay)
+    criterion = nn.CrossEntropyLoss(reduction='none',) # will manually mask invalid alts; it already assumes y is index
     l2_lambda = l2  # L2 regularization strength
     # Training loop
     for epoch in range(nepoch):  # number of epochs
@@ -378,6 +385,37 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,
                 ts_losses.append(ts_loss.item())
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
+    '''
+    # Training loop draft for SEAL, L2 reg not reflected
+    for epoch in range(num_epochs):
+        model.train()
+        
+        # Forward pass
+        y_hat, latent_classes = model(seg, nums, mask)  # y_hat: predicted probabilities (2D), latent_classes: class probabilities
+        
+        # Custom Cross-Entropy Loss calculation with masking
+        y_hat_masked = y_hat * mask  # Apply mask to ignore invalid (mask==0) alternatives
+        y_hat_log_masked = torch.log(y_hat_masked + 1e-7)  # Avoid log(0) (numerical stability)
+        
+        # Gather the predicted log-probabilities for the chosen alternatives
+        chosen_alternative_log_probs = torch.gather(y_hat_log_masked, 1, y.unsqueeze(1)).squeeze(1)  # Gather for chosen alternatives indexed by y
+        
+        # Compute loss only for valid alternatives
+        valid_alternatives_loss = -chosen_alternative_log_probs * mask.sum(1)  # Only consider valid choices
+        
+        # Cross-Entropy Loss: Average across all valid alternatives (i.e., for all agents)
+        loss = valid_alternatives_loss.mean()
+        
+        # Add regularization (if necessary)
+        for param in model.parameters():
+            loss += regularization_factor * torch.sum(param ** 2)  # L2 regularization (custom)
+        
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    '''
+    
     outfin=outputs.detach().cpu().numpy()
     ynp=y_tr.detach().cpu().numpy()
     LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
@@ -534,96 +572,3 @@ print('Finished')
 #dfIn.match.to_clipboard(index=False,header=False)
 
 
-#%% #generating pathsXXXX.csv
-'''
-initInput=pd.read_csv('result2022.csv',low_memory=False, encoding='ISO 8859-1')
-initInput['nodes']=''
-initInput=initInput.loc[initInput.sid.isin(initInput.loc[initInput.match==1,'sid'].unique())]
-initInput.to_csv('paths2022.csv',index=False)
-'''
-
-#%%
-'''deprecated deterministic assignment model
-class CombinedModelD(nn.Module):
-    def __init__(self, segmentation_input_size, num_classes, numeric_input_size):
-        super(CombinedModelD, self).__init__()
-        self.latent_class_nn = LatentClassNN(segmentation_input_size, 32, num_classes)
-        self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
-    def forward(self, segmentation_bases, numeric_attrs):
-        latent_classes = self.latent_class_nn(segmentation_bases)
-        batch_size = numeric_attrs.size(0)
-        numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
-       # Determine the most probable latent class for each observation
-        most_probable_classes = torch.argmax(latent_classes, dim=1)
-        # Create a tensor to hold the logits
-        logits = torch.zeros(batch_size).to(device)
-        # Compute logits for the most probable class for each observation
-        for i in range(batch_size):
-            class_index = most_probable_classes[i]
-            beta_values = self.beta[class_index]
-            # Separate intercept and non-intercept beta values
-            intercept = beta_values[0]
-            non_intercepts = beta_values[1:]
-            # Apply transformation to enforce non-positive non-intercept beta values
-            non_intercepts = -torch.nn.functional.relu(non_intercepts)
-            # Compute the logit for the current observation
-            logit = intercept + torch.dot(non_intercepts, numeric_attrs_with_intercept[i, 1:])
-            logits[i] = logit
-        # Aggregate class probabilities for the final output probability of y=1
-        final_probabilities = torch.sigmoid(logits)
-        # Clamp the probabilities to avoid log(0) issues
-        final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7)
-        return final_probabilities
-# Training function
-def train_modelD(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1):
-    model = CombinedModelD(segmentation_bases.shape[1], num_classes, numeric_attrs.shape[1]).to(device)
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lrate)
-    l2_lambda = l2  # L2 regularization strength
-    losses = []  # List to store loss values
-    # Training loop
-    for epoch in range(nepoch):  # number of epochs
-        model.train()
-        optimizer.zero_grad()
-        outputs = model(segmentation_bases, numeric_attrs)
-        loss = criterion(outputs,y)  # Reshape target to match output
-        # L2 regularization only for nn part
-        l2_reg = 0
-        for name, param in model.named_parameters():
-            if 'latent_class_nn' in name:
-                l2_reg += torch.norm(param)
-        loss += l2_lambda * l2_reg
-        #gradient flow
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.item())  # Store the loss value
-        if (epoch + 1) % 50 == 0:
-            print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
-    outfin=outputs.detach().cpu().numpy()
-    ynp=np.clip(y.detach().cpu().numpy(),1e-7, 1 - 1e-7)
-    #comp=pd.DataFrame([ynp,outfin]).T
-    #comp['sqerr']=(comp.loc[:,0]-comp.loc[:,1])**2
-    LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
-    #out0=ynp.mean()
-    out0=1/2
-    LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
-    rhosq=1-LLM/LL0
-    print(f' ******* McFadden rho-sq value: {rhosq:.4f} *******')
-    return model, losses, outputs
-
-# Train models for both encodings
-num_classes = 2  # Define the number of latent classes
-modelout, lossesout, estimates = train_modelD(segmentation_bases,nepoch=300,lrate=0.001,l2=0.1)
-
-# Plot the loss values
-plt.plot(range(1, len(lossesout) + 1), lossesout)
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training Loss')
-plt.show()
-
-# Inspect the estimated beta values for both models
-beta_values= modelout.beta.detach().clone().cpu().numpy()
-print("Estimated beta values:")
-print(beta_values)
-'''
