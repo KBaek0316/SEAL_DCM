@@ -261,7 +261,7 @@ class Embedding(nn.Module):
         return 0
 
 class SEAL_DCM(nn.Module):
-    def __init__(self, segSize, nClasses, numSize,nnodes,intcpt=True,negBeta=0,max_alts=5):
+    def __init__(self, segSize, nClasses, numSize,nnodes,intcpt=True,negBeta=0):
         super(SEAL_DCM, self).__init__()
         self.latent_class_nn = MembershipModel(segSize, nnodes, nClasses)
         if intcpt:
@@ -278,7 +278,7 @@ class SEAL_DCM(nn.Module):
             beta = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
         # Separate intercept and non-intercept beta values
         if self.negBeta>0: # Apply negative ReLU to enforce non-positive estimates for last negBeta coefficients
-            beta_free = beta[:, :, :-1*(self.negBeta)] #dim: nobs * nclass * varcols
+            beta_free = beta[:, :, : -1*(self.negBeta)] #dim: nobs * nclass * varcols
             beta_const = beta[:, :, -1*(self.negBeta):] #dim: nobs * nclass * varcols
             beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
             beta = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols

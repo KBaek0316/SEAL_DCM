@@ -22,7 +22,7 @@ else:
 pd.set_option('future.no_silent_downcasting', True)
 os.chdir(WPATH)
 
-dfMNL=pd.read_csv('dfMNL.csv')
+dfMNL=pd.read_csv('dfPP.csv')
 dfMNL['tway']=0
 dfMNL.loc[dfMNL.tiv>0,'tway']=1
 
