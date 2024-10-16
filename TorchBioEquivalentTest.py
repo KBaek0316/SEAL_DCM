@@ -8,20 +8,25 @@ Created on Mon Oct 14 18:36:36 2024 GMT-5
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
 
 # Configuration
 batch_size = 1000
 num_alternatives = 3
 num_attributes = 4
+num_epochs=300
+lrate=0.02
 
 # Sample data for all J alternatives: (batch_size, num_alternatives, num_attributes)
 Z = torch.randn(batch_size, num_alternatives, num_attributes) #std random
 X = 10 + 3 * Z
 beta = torch.randn(num_attributes)
-eps = 3 * torch.randn(batch_size, num_alternatives)  # Noise with mean 0 and std 3
+eps = 10 * torch.randn(batch_size, num_alternatives)  # Noise with mean 0 and std 3
 utils = torch.matmul(X, beta) + eps
 y = torch.argmax(utils, dim=1)  # Chosen alternative for each agent (shape: batch_size)
-
+print(f"Synthesized Betas: {beta}")
+print('Test starts')
+print('')
 
 #%% Model 1: All J alternatives (absolute attributes)
 class MultinomialLogitModel(nn.Module):
@@ -35,52 +40,27 @@ class MultinomialLogitModel(nn.Module):
         utilities = utilities.squeeze(-1)  # Remove the last dimension: (batch_size, num_alternatives)
         return utilities
 
-# Instantiate the model for all J alternatives
-model_all = MultinomialLogitModel(num_attributes, num_alternatives)
-
-# Define the loss function (cross entropy) and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer_all = optim.Adam(model_all.parameters(), lr=0.01)
-
-# Forward pass: compute utilities (logits) for all alternatives
-logits_all = model_all(X)
-
-# Compute the loss for all alternatives
-loss_all = criterion(logits_all, y)
-
-# Backward pass and optimization for Model 1
-optimizer_all.zero_grad()
-loss_all.backward()
-optimizer_all.step()
-
-# Print the parameters after optimization for Model 1
-print("Parameters for Model 1 (all alternatives):")
-for param in model_all.parameters():
-    print(param.data)
-
-
 #%% Model 2: J-1 alternatives (differences with respect to alternative 0)
 # Step 1: Reorder X so that the chosen alternative is moved to the last row for each individual
 def reorder_X_based_on_y(X, y):
     X_reordered = X.clone()  # Clone the original X to avoid modifying it
+    y_reordered = y.clone()
     for i in range(batch_size):
         chosen_idx = y[i].item()  # Get the chosen alternative for individual i
-        # Move the chosen alternative to the last row
-        non_chosen = torch.cat((X_reordered[i, :chosen_idx], X_reordered[i, chosen_idx+1:]), dim=0)
-        chosen = X_reordered[i, chosen_idx].unsqueeze(0)  # Add a dimension for the chosen alternative
-        # Combine the non-chosen alternatives with the chosen one at the end
-        X_reordered[i] = torch.cat((non_chosen, chosen), dim=0)
-    return X_reordered
+        if chosen_idx==0: #if chosen is the first alt, push it to the last
+            X_reordered[i]=torch.cat((X[i,1:,:],X[i,0,:].unsqueeze(0)),dim=0)
+            y_reordered[i]=num_alternatives-1
+    return X_reordered, y_reordered
 
 # Reorder X so that the chosen alternative is always the last row for each individual
-X_reordered = reorder_X_based_on_y(X, y)
+X_reordered, y_reordered = reorder_X_based_on_y(X, y)
 
 # Step 2: Compute the differences between non-chosen alternatives and the chosen one
 # After reordering, the last row of each individual's X is the chosen alternative
-X_diff = X_reordered[:, :-1, :] - X_reordered[:, -1:, :]  # Compute differences with the chosen alternative
+X_diff = X_reordered[:, 1:, :] - X_reordered[:, 0, :].unsqueeze(1)  # Compute differences with the first (always nonchosen) alt.
 
-# Adjust labels to account for the reordering (since the chosen one is at the last row)
-y_diff = (num_alternatives - 2) * torch.ones_like(y)  # Labels should be the index of the last row
+# Adjust labels to account for the deleted first alt
+y_diff = y_reordered-1 
 
 ### Model: J-1 alternatives (differences with respect to the reordered chosen alternative)
 class ReducedMultinomialLogitModel(nn.Module):
@@ -94,29 +74,60 @@ class ReducedMultinomialLogitModel(nn.Module):
         utilities_diff = utilities_diff.squeeze(-1)  # Shape: (batch_size, J-1)
         return utilities_diff
 
-# Instantiate the model for J-1 alternatives
+
+#%% Training
+# Instantiate the models
+model_all = MultinomialLogitModel(num_attributes, num_alternatives)
 model_diff = ReducedMultinomialLogitModel(num_attributes)
 
-# Define the loss function and optimizer for the difference model
-criterion_diff = nn.CrossEntropyLoss()
-optimizer_diff = optim.Adam(model_diff.parameters(), lr=0.01)
+# Define the loss function (cross entropy) and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer_all = optim.Adam(model_all.parameters(), lr=lrate)
+optimizer_diff = optim.Adam(model_diff.parameters(), lr=lrate)
 
-# Forward pass: compute utility differences (logits) for J-1 alternatives
-logits_diff = model_diff(X_diff)
+# Prepare to store losses for plotting
+losses_all = []
+losses_diff = []
 
-# Compute the loss for J-1 alternatives (the label is num_alternatives-1 since the last row is the chosen one)
-loss_diff = criterion_diff(logits_diff, y_diff)
+for epoch in range(num_epochs):
+    # Clear gradients
+    optimizer_all.zero_grad()
+    optimizer_diff.zero_grad()
 
-# Backward pass and optimization for Model 2
-optimizer_diff.zero_grad()
-loss_diff.backward()
-optimizer_diff.step()
+    ### Model 1: Multinomial Logit Model (all alternatives) ###
+    logits_all = model_all(X)
+    loss_all = criterion(logits_all, y)
+    loss_all.backward()
+    optimizer_all.step()
+    losses_all.append(loss_all.item())  # Store loss
 
+    ### Model 2: Reduced Multinomial Logit Model (J-1 alternatives) ###
+    logits_diff = model_diff(X_diff)
+    loss_diff = criterion(logits_diff, y_diff)
+    loss_diff.backward()
+    optimizer_diff.step()
+    losses_diff.append(loss_diff.item())  # Store loss
+
+# Print the parameters after optimization for Model 1
+print("Parameters for Model 1 (all alternatives):")
+for param in model_all.parameters():
+    print(param.data)
 
 # Print the parameters after optimization for Model 2
 print("\nParameters for Model 2 (J-1 alternatives):")
 for param in model_diff.parameters():
     print(param.data)
+
+#%% Plot
+plt.figure(figsize=(10, 6))
+plt.plot(range(num_epochs), losses_all, label='All Alternatives', color='b')
+plt.plot(range(num_epochs), losses_diff, label='J-1 Alternatives', color='r')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training Loss for Pytorch-made Multinomial Logit Models')
+plt.legend()
+plt.grid(True)
+plt.show()
 
 
 #%% Compare Model1 with Biogeme
@@ -179,16 +190,29 @@ for i in range(1,num_alternatives + 1): #for each alts
         V[i] += attrs[k] * betas[k]
 
 
-
-
 # Define the logit model (with no availability restrictions)
 logprob = loglogit(V, None, chosen)
-
 # Create the Biogeme object
 biogeme_model = biogeme.BIOGEME(database, logprob)
+biogeme_model.modelName = ''
+biogeme_model.generate_html = False  # Disable HTML report
+biogeme_model.generate_pickle = False  # Disable pickle output
+biogeme_model.save_iterations = False  # Disable saving of iteration logs (prevents .iter files)
+biogeme_model.generate_toml = False  # Prevent creation of the .toml configuration file
 
 # Estimate the model
 results = biogeme_model.estimate()
+rhosq=results.get_general_statistics()['Rho-square for the init. model'][0]
+rhobsq=results.get_general_statistics()['Rho-square-bar for the init. model'][0]
 
-# Print the estimated parameters
+print('Biogeme Results')
 print(results.get_estimated_parameters())
+print(f'Rhosq: {rhosq:.4f}')
+print(f'RhoBarsq: {rhobsq:.4f}')
+
+'''
+Test Conclusions:
+    It seems Pytorch does not normalize the error term’s variance to pisq/6
+    Pytorch's CELoss using indexed y input with raw path attrs fed works almost good as biogeme in terms of MRS
+    Deliberate preprocessing to input difference matrix (J-1 alt) can be efficient
+'''
