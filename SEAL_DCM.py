@@ -281,61 +281,31 @@ class SEAL_DCM(nn.Module):
         if self.negBeta>0: # Apply negative ReLU to enforce non-positive estimates for last negBeta numbers of coefficients
             beta_free = beta[:, :, : -1*(self.negBeta)] #dim: nobs * nclass * varcols
             beta_const = beta[:, :, -1*(self.negBeta):] #dim: nobs * nclass * varcols
-            beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
+            beta_const = -F.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
             beta = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
         # Compute logits for each class: batch x alternatives x classes
         logits = torch.bmm(nums, beta.permute(0, 2, 1)) #[nobs nalts nseg] * [nobs nalts nclass]
         logits_masked=logits*mask.unsqueeze(-1)
         alt_class_probs=torch.sigmoid(logits_masked)
         # Aggregate class probabilities for the final output probability of y=1
-        final_prob = torch.sum(latent_classes.unsqueeze(1) * alt_class_probs, dim=2)
+        final_prob = torch.sum(latent_classes.unsqueeze(1) * alt_class_probs, dim=2) #sum([batch,1,nclass] * [batch,nalt,nclass],pivotdim:nclass)
         final_prob = torch.clamp(final_prob, 1e-7, 1 - 1e-7) #avoid log(0)
         return final_prob, latent_classes
-
-class NNLCCM(nn.Module): #deprecated
-    def __init__(self, segmentation_input_size, num_classes, numeric_input_size,nnodes,negBeta):
-        super(NNLCCM, self).__init__()
-        self.latent_class_nn = MembershipModel(segmentation_input_size, nnodes, num_classes)
-        self.beta = nn.Parameter(torch.randn(num_classes, numeric_input_size + 1))  # Including intercept
-        self.negBeta=negBeta
-
-    def forward(self, segmentation_bases, numeric_attrs):
-        latent_classes = self.latent_class_nn(segmentation_bases)
-        batch_size = numeric_attrs.size(0)
-        numeric_attrs_with_intercept = torch.cat([torch.ones(batch_size, 1).to(device), numeric_attrs], dim=1)
-        beta_expanded = self.beta.unsqueeze(0).expand(batch_size, -1, -1)
-        # Separate intercept and non-intercept beta values
-        beta_free = beta_expanded[:, :, :-2] #dim: nobs * nclass * cols
-        beta_const = beta_expanded[:, :, -2:] #dim: nobs * nclass * cols
-        # Apply negative ReLU to enforce non-positive betas
-        if self.negBeta:
-            beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
-        # Concatenate intercepts and transformed non-intercepts
-        beta_expanded = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
-        # Compute logits for each class
-        logits = torch.bmm(numeric_attrs_with_intercept.unsqueeze(1), beta_expanded.permute(0, 2, 1)).squeeze(1)
-        # Aggregate class probabilities for the final output probability of y=1
-        final_probabilities = torch.sum(latent_classes * torch.sigmoid(logits), dim=1)
-        final_probabilities = torch.clamp(final_probabilities, 1e-7, 1 - 1e-7) #avoid log(0)
-        return final_probabilities, latent_classes
-    def nonPosConst(self):
-        return self.negBeta
 
 
 
 # Training function
-def train_model(seg,nums,y,testVal=False,rho0=False,negBetaNum=0,nclass=2,
-                max_norm=2,nnodes=32,nepoch=300,lrate=0.05,l2Gamma=0.005):
+def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
+                max_norm=5,nnodes=32,nepoch=300,lrate=0.05,l2Gamma=0.05):
     '''
     testVal=True
     nclass=2
     nnodes=64
-    nepoch=300
-    lrate=0.03
-    l2Gamma=0.002
+    nepoch=500
+    lrate=0.02
+    l2Gamma=0.05
     negBetaNum=0
-    max_norm=1
-    rho0=True
+    max_norm=5
     '''
     #Setup
     if testVal:
@@ -359,8 +329,8 @@ def train_model(seg,nums,y,testVal=False,rho0=False,negBetaNum=0,nclass=2,
         chosen_logprobs = torch.gather(y_hat_ml, 1, y_tr.unsqueeze(1)).squeeze(1)  # log(y_n^i_hat)s only for chosen alternatives indexed by y
         loss_raw = -chosen_logprobs.mean() # =-(1/N)sum(i){sum(j){y_n^i*log(y_n^i_hat)}}; sum(i) redundant because of the above line
         # L2 regularization only for nn part
-        l2_reg = sum(torch.norm(param) for name, param in model.named_parameters() if 'latent_class_nn' in name)
-        loss= loss_raw + l2_reg * l2Gamma
+        l2 = sum(torch.norm(param) for name, param in model.named_parameters() if 'latent_class_nn' in name)
+        loss= loss_raw + l2 * l2Gamma
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
@@ -379,37 +349,37 @@ def train_model(seg,nums,y,testVal=False,rho0=False,negBetaNum=0,nclass=2,
                 ts_losses.append(ts_loss)
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
-    #Summary
-    outputs,membership = model(seg_tr, nums_tr,mask)
-    outfin=outputs.detach().cpu().numpy()
-    ynp=y_tr.detach().cpu().numpy()
-    LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
-    out0=ynp.mean() #(LL(Constant))
-    if rho0:
-        out0=1/nclass #LL(0)
-    LL0=sum(ynp*np.log(out0)+(1-ynp)*np.log(1-out0))
-    rhosq=1-LLM/LL0
+    # Summary
+    LL0=torch.sum(torch.log(1/(1+mask_tr.sum(dim=1)))).item()
+    LLB=torch.sum(chosen_logprobs).item()
+    rhosq=1-(LLB/LL0)
     print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
     if testVal:
-        out_ts=ts_outputs.detach().cpu().numpy()
-        yts=y_ts.detach().cpu().numpy()
-        LLM_ts=sum(yts*np.log(out_ts)+(1-yts)*np.log(1-out_ts))
-        out0_ts=yts.mean() #(LL(Constant))
-        if rho0:
-            out0_ts=1/nclass #LL(0)
-        LL0_ts=sum(yts*np.log(out0_ts)+(1-yts)*np.log(1-out0_ts))
-        rhosq_ts=1-LLM_ts/LL0_ts
-        print(f' *******Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
-        plt.plot(range(1, len(tr_losses) + 1), tr_losses, label='Training Loss')
-        plt.plot(range(1, len(ts_losses) + 1), ts_losses, label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title(f'Losses (nnodes: {nnodes} lrate: {lrate:.3f}, l2:{l2Gamma:.3f})')
-        plt.legend()
-        plt.show()
-        return model, tr_losses, rhosq, rhosq_ts
+        LL0_ts=torch.sum(torch.log(1/(1+mask_ts.sum(dim=1)))).item()
+        LLB_ts=torch.sum(chosen_logprobs_ts).item()
+        rhosq_ts=1-(LLB_ts/LL0_ts)
+        print(f' ******* Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
+        plt.plot(range(1, len(ts_losses) + 1), ts_losses, label='Testing Loss')
     else:
-        return model, tr_losses, rhosq, None
+        rhosq_ts=np.nan
+    plt.plot(range(1, len(tr_losses) + 1), tr_losses, label='Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(f'Losses (nnodes: {nnodes} lrate: {lrate:.3f}, l2:{l2Gamma:.3f})')
+    plt.legend()
+    plt.show()
+    print(attrsUsed)
+    print(model.beta.cpu().detach().numpy())
+    '''
+    # Output
+    outputs,membership = model(seg, nums,mask)
+    outputs=outputs*mask
+    outfin=torch.gather(outputs, 1, y.unsqueeze(1)).squeeze(1)
+    outfin=outputs.detach().cpu().numpy()
+    membership=membership.detach().cpu().numpy()
+    '''
+    return model, rhosq, rhosq_ts #model, tr_losses, rhosq, rhosq_ts
+
 #%% Model Tuning
 def desiredModel(betas,rsq,rhots=None,strict=False,interDiff=0.5/2.5,betaNonSig=0.05/2.5,rsqCut=0.4): #sqrt(10-1)=3 maxElemExclAdj->2.5
     adjL2norm=LA.norm(betas.flatten()[betas.flatten()<betas.max()]) #delete largest elem, then L2
