@@ -19,9 +19,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 if os.environ['USERPROFILE']=='C:\\Users\\baek0040':
-    WPATH=r'C:\Users\baek0040\Documents\GitHub\NM-LCCM'
+    WPATH=r'C:\Users\baek0040\Documents\GitHub\SEAL_DCM'
 else:
-    WPATH=os.path.abspath(r'C:\git\NM-LCCM')
+    WPATH=os.path.abspath(r'C:\git\SEAL_DCM')
 pd.set_option('future.no_silent_downcasting', True)
 os.chdir(WPATH)
 
@@ -261,23 +261,24 @@ class Embedding(nn.Module):
         return 0
 
 class SEAL_DCM(nn.Module):
-    def __init__(self, segSize, nClasses, numSize,nnodes,intcpt=True,negBeta=0):
+    def __init__(self, segSize, nClasses, numSize,nnodes,intcpt=False,negBeta=0):
         super(SEAL_DCM, self).__init__()
         self.latent_class_nn = MembershipModel(segSize, nnodes, nClasses)
-        if intcpt:
+        self.negBeta=negBeta
+        self.intcpt=intcpt
+        if self.intcpt:
             self.beta = nn.Parameter(torch.randn(nClasses, numSize + 1))  # Including intercept
         else:
             self.beta = nn.Parameter(torch.randn(nClasses, numSize))  # Not including intercept
-        self.negBeta=negBeta
-        self.intcpt=intcpt
+        
     def forward(self, seg,nums,mask):
         latent_classes = self.latent_class_nn(seg)
         batch_size = nums.size(0)
         if self.intcpt:
             nums = torch.cat([torch.ones(batch_size, 1).to(device), nums], dim=1)
-            beta = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
+        beta = self.beta.unsqueeze(0).expand(batch_size, -1, -1) #expand along the first dim (repeats); -1:keep this dim's size
         # Separate intercept and non-intercept beta values
-        if self.negBeta>0: # Apply negative ReLU to enforce non-positive estimates for last negBeta coefficients
+        if self.negBeta>0: # Apply negative ReLU to enforce non-positive estimates for last negBeta numbers of coefficients
             beta_free = beta[:, :, : -1*(self.negBeta)] #dim: nobs * nclass * varcols
             beta_const = beta[:, :, -1*(self.negBeta):] #dim: nobs * nclass * varcols
             beta_const = -torch.nn.functional.relu(-1*beta_const) #alternative: -torch.abs(non_intercepts)
@@ -323,99 +324,63 @@ class NNLCCM(nn.Module): #deprecated
 
 
 # Training function
-def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,nclass=2,
-                max_norm=2,nnodes=32,nepoch=300,lrate=0.05,l2=0.005,wDecay=1e-5):
+def train_model(seg,nums,y,testVal=False,rho0=False,negBetaNum=0,nclass=2,
+                max_norm=2,nnodes=32,nepoch=300,lrate=0.05,l2Gamma=0.005):
     '''
-    seg=segmentation_bases
-    nume=numeric_attrs
-    yval=y
+    testVal=True
     nclass=2
     nnodes=64
-    nepoch=500
+    nepoch=300
     lrate=0.03
-    l2=0.002
-    negConst=True
+    l2Gamma=0.002
+    negBetaNum=0
     max_norm=1
-    testVal=True
     rho0=True
-    wDecay=1e-5
     '''
-    #setup
+    #Setup
     if testVal:
         tr, ts = train_test_split(np.arange(len(y)), test_size=0.2, random_state=5723588)
-        seg_ts=seg[ts]
-        nume_ts=nume[ts]
-        y_ts=y[ts]
-        ts_losses = []  # List to store test or validation loss
-    else: #actual run
+        seg_ts, nums_ts, y_ts, mask_ts = seg[ts], nums[ts], y[ts], mask[ts]
+        ts_losses = []
+    else:
         tr=range(len(y))
-    seg_tr=seg[tr]
-    nume_tr=nume[tr]
-    y_tr=y[tr]
-    tr_losses = []  # List to store training loss values
-    model = SEAL_DCM(seg_tr.shape[1], nclass, nume_tr.shape[1],nnodes,negBeta=negConst).to(device)
-    
-    optimizer = optim.Adam(model.parameters(), lr=lrate,weight_decay=wDecay)
-    criterion = nn.CrossEntropyLoss(reduction='none',) # will manually mask invalid alts; it already assumes y is index
-    l2_lambda = l2  # L2 regularization strength
+    seg_tr, nums_tr, y_tr, mask_tr = seg[tr], nums[tr], y[tr], mask[tr]
+    tr_losses = []
+    model = SEAL_DCM(seg_tr.shape[1], nclass, nums_tr.shape[2],nnodes,negBeta=negBetaNum).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lrate)
     # Training loop
     for epoch in range(nepoch):  # number of epochs
         model.train()
-        optimizer.zero_grad()
-        outputs,membership = model(seg_tr, nume_tr)
-        loss = criterion(outputs,y_tr)  # Reshape target to match output
+        #Forward
+        y_hat, latent_classes = model(seg_tr, nums_tr, mask_tr)
+        #CELoss with Masking
+        y_hat_ml = torch.log(y_hat * mask_tr + 1e-7)  # Apply mask to ignore invalid (mask==0) alternatives and avoid log(0)
+        # Gather the predicted log-probabilities for the chosen alternatives
+        chosen_logprobs = torch.gather(y_hat_ml, 1, y_tr.unsqueeze(1)).squeeze(1)  # log(y_n^i_hat)s only for chosen alternatives indexed by y
+        loss_raw = -chosen_logprobs.mean() # =-(1/N)sum(i){sum(j){y_n^i*log(y_n^i_hat)}}; sum(i) redundant because of the above line
         # L2 regularization only for nn part
-        l2_reg = 0
-        for name, param in model.named_parameters():
-            if 'latent_class_nn' in name:
-            #if 'latent_class_nn' in name or 'beta' in name and const is not model.beta[:, 1:]:
-                l2_reg += torch.norm(param)
-        loss += l2_lambda * l2_reg
-        #gradient flow
+        l2_reg = sum(torch.norm(param) for name, param in model.named_parameters() if 'latent_class_nn' in name)
+        loss= loss_raw + l2_reg * l2Gamma
+        # Backpropagation
+        optimizer.zero_grad()
         loss.backward()
         if max_norm is not None:
             nn.utils.clip_grad_norm_(model.parameters(), max_norm) #prevent gradient explosion
         optimizer.step()
+        #Bookkeeping
         tr_losses.append(loss.item())  # Store the loss value
         if testVal:
             model.eval()
             with torch.no_grad():
-                ts_outputs, _ = model(seg_ts, nume_ts)
-                ts_loss = criterion(ts_outputs, y_ts)
-                ts_losses.append(ts_loss.item())
+                y_hat_ts, _ = model(seg_ts, nums_ts, mask_ts)
+                y_hat_ml_ts = torch.log(y_hat_ts * mask_ts + 1e-7)
+                chosen_logprobs_ts = torch.gather(y_hat_ml_ts, 1, y_ts.unsqueeze(1)).squeeze(1)
+                ts_loss = -chosen_logprobs_ts.mean().item()
+                ts_losses.append(ts_loss)
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
-    '''
-    # Training loop draft for SEAL, L2 reg not reflected
-    for epoch in range(num_epochs):
-        model.train()
-        
-        # Forward pass
-        y_hat, latent_classes = model(seg, nums, mask)  # y_hat: predicted probabilities (2D), latent_classes: class probabilities
-        
-        # Custom Cross-Entropy Loss calculation with masking
-        y_hat_masked = y_hat * mask  # Apply mask to ignore invalid (mask==0) alternatives
-        y_hat_log_masked = torch.log(y_hat_masked + 1e-7)  # Avoid log(0) (numerical stability)
-        
-        # Gather the predicted log-probabilities for the chosen alternatives
-        chosen_alternative_log_probs = torch.gather(y_hat_log_masked, 1, y.unsqueeze(1)).squeeze(1)  # Gather for chosen alternatives indexed by y
-        
-        # Compute loss only for valid alternatives
-        valid_alternatives_loss = -chosen_alternative_log_probs * mask.sum(1)  # Only consider valid choices
-        
-        # Cross-Entropy Loss: Average across all valid alternatives (i.e., for all agents)
-        loss = valid_alternatives_loss.mean()
-        
-        # Add regularization (if necessary)
-        for param in model.parameters():
-            loss += regularization_factor * torch.sum(param ** 2)  # L2 regularization (custom)
-        
-        # Backpropagation
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    '''
-    
+    #Summary
+    outputs,membership = model(seg_tr, nums_tr,mask)
     outfin=outputs.detach().cpu().numpy()
     ynp=y_tr.detach().cpu().numpy()
     LLM=sum(ynp*np.log(outfin)+(1-ynp)*np.log(1-outfin))
@@ -439,7 +404,7 @@ def train_model(seg,nume,yval,testVal=False,rho0=False,negConst=False,nclass=2,
         plt.plot(range(1, len(ts_losses) + 1), ts_losses, label='Validation Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
-        plt.title(f'Losses (nnodes: {nnodes} lrate: {lrate:.3f}, l2:{l2:.3f})')
+        plt.title(f'Losses (nnodes: {nnodes} lrate: {lrate:.3f}, l2:{l2Gamma:.3f})')
         plt.legend()
         plt.show()
         return model, tr_losses, rhosq, rhosq_ts
