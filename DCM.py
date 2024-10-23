@@ -28,7 +28,7 @@ dfMNL.loc[dfMNL.tiv>0,'tway']=1
 
 if dfMNL.iv.min()<=0:
     raise Exception('remove iv<=0 paths')
-dfMNL['alt'] = dfMNL.groupby('id').cumcount() + 1 #redefine from 1 to 5 (in NNLCCM, 0 to 4, where 0 is deleted as reference alt)
+dfMNL['alt'] = dfMNL.groupby('id').cumcount() + 1 #redefine from 1 to 5 (in SEAL_DCM, 0 to 4, where 0 is deleted as reference alt)
 maxalt=dfMNL.alt.max()
 
 def ppForBiogeme(dfM,attrcols=['iv','ov','nTrans','PS','tway','wt','aux','wk','nwk']):

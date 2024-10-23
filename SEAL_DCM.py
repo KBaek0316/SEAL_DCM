@@ -29,10 +29,9 @@ os.chdir(WPATH)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 #available pathattrs: 'nwk','wk','wt','ntiv','tiv','nTrans' ,'aux', 'ov', 'iv','tt','PS'
-attrsUsed=['PS','tway','nTrans','wk','nwk','wt','iv'] #the last two should be iv and ntrans for desired model eval
+attrsUsed=['tway','PS','wk','nwk','wt','nTrans','iv'] #the last two should be iv and ntrans for desired model eval
 
 doPreprocess=False
-
 #%% Data Preprocessing
 def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=None,strict=True):
     '''for debugging
@@ -182,18 +181,19 @@ def attachPS(df):
     print('Path Size Correction Term has been calculated')
     return df
 
-def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[]):
+def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[],makediff=False):
     '''
     pathcols=attrsUsed
     dropcols=['duration']
     stdcols=['age', 'income', 'duration']
+    makediff=True
     '''
     #setup
     PathSurvCut=np.where(dfPP.columns=='alt')[0][0]
     maxalt=dfPP.alt.max()
     #segmentation bases
     dfS=dfPP.iloc[:,PathSurvCut:].copy()
-    dfS['id'] = dfPP['id'] #not need, but kept for debugging-inspection
+    dfS['id'] = dfPP['id'] #not needed, but kept for debugging-inspection
     dfS=dfS.loc[dfS.alt==0,:]
     #final survey preprocessing with standardization
     if len(stdcols)>0:
@@ -205,17 +205,21 @@ def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[]):
     #numerical attributes; only difference matters and alt0 is never a chosen path by dfPath.sort_values(['id','match']) per definition
     dfX=dfPP.iloc[:,:PathSurvCut+1].copy()
     dfX=dfX.loc[:,np.append(['id','alt','match'],pathcols)]
-    dfX2=dfX[dfX.alt==0].drop(columns=['alt','match'])
-    dfXD=pd.merge(dfX, dfX2, on='id', suffixes=('_main', '_aux'))
-    for attr in pathcols:  #calc difference
-        dfXD[attr] = dfXD[f'{attr}_main'] - dfXD[f'{attr}_aux']
-    dfXD=dfXD.loc[dfXD.alt!=0,dfX.columns]
+    if makediff: #alt0 should be preprocessed as nonmatching path; we did in dfPath.sort_values(['id','match'])
+        dfX2=dfX[dfX.alt==0].drop(columns=['alt','match']) 
+        dfXD=pd.merge(dfX, dfX2, on='id', suffixes=('_main', '_aux'))
+        for attr in pathcols:  #calc difference
+            dfXD[attr] = dfXD[f'{attr}_main'] - dfXD[f'{attr}_aux']
+        dfXD=dfXD.loc[dfXD.alt!=0,dfX.columns]
+        maxalt=maxalt-1 #dim downed
+    else: #not making difference matrix (numalt dimension kept)
+        dfXD=dfX.copy()
     grouped=dfXD.groupby('id')
     numlist=grouped[pathcols].apply(lambda x: x.values.tolist()).tolist()
     nums=torch.nn.utils.rnn.pad_sequence([torch.tensor(a,dtype=torch.float32) for a in numlist], batch_first=True, padding_value=0).to(device)
     choices = (grouped.apply(lambda x: np.argmax(x['match'].values),include_groups=False)).tolist() #pytorch accepts 0-starting indices
     choices=torch.tensor(choices, dtype=torch.long).to(device)
-    validAlt = grouped['alt'].apply(lambda x: [1] * len(x) + [0] * (maxalt - len(x)), include_groups=False).tolist()
+    validAlt = grouped['alt'].apply(lambda x: [1] * len(x) + [0] * (maxalt+1 - len(x)), include_groups=False).tolist()
     validAlt = torch.tensor(validAlt, dtype=torch.float32).to(device)
     dfIn=pd.merge(dfXD,dfS,on='id')
     return seg, nums, choices, validAlt,dfIn
@@ -230,13 +234,16 @@ if doPreprocess:
     del dfPath, dfSurvey
 else:
     dfPP=pd.read_csv('dfPP.csv')
-#dfPath=dfPP.copy()
 
 
 seg, nums, y, mask, dfIn=genTensors(dfPP,
                                                      pathcols=attrsUsed,
                                                      dropcols=['duration'],
-                                                     stdcols=['age', 'income', 'duration'])
+                                                     stdcols=['age', 'income', 'duration'],
+                                                     makediff=False)
+
+
+
 
 
 #%% Model Definition
@@ -285,8 +292,9 @@ class SEAL_DCM(nn.Module):
             beta = torch.cat([beta_free,beta_const], dim=2) #dim 2 because concatenate 1 and nnumcols
         # Compute logits for each class: batch x alternatives x classes
         logits = torch.bmm(nums, beta.permute(0, 2, 1)) #[nobs nalts nseg] * [nobs nalts nclass]
-        logits_masked=logits*mask.unsqueeze(-1)
-        alt_class_probs=torch.sigmoid(logits_masked)
+        #logits_masked=logits*mask.unsqueeze(-1) #not normalizing result probs
+        logits_masked = logits.masked_fill(mask.unsqueeze(-1) == 0, -1e9) #normalizing result probs; sum up to 1
+        alt_class_probs = torch.softmax(logits_masked, dim=1)
         # Aggregate class probabilities for the final output probability of y=1
         final_prob = torch.sum(latent_classes.unsqueeze(1) * alt_class_probs, dim=2) #sum([batch,1,nclass] * [batch,nalt,nclass],pivotdim:nclass)
         final_prob = torch.clamp(final_prob, 1e-7, 1 - 1e-7) #avoid log(0)
@@ -300,10 +308,10 @@ def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
     '''
     testVal=True
     nclass=2
-    nnodes=64
-    nepoch=500
-    lrate=0.02
-    l2Gamma=0.05
+    nnodes=128
+    nepoch=300
+    lrate=0.03
+    l2Gamma=0.02
     negBetaNum=0
     max_norm=5
     '''
@@ -349,13 +357,13 @@ def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
                 ts_losses.append(ts_loss)
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
-    # Summary
-    LL0=torch.sum(torch.log(1/(1+mask_tr.sum(dim=1)))).item()
+    # Summary; torch.sum(torch.log(1/(1+mask_tr.sum(dim=1)))).item() when diff used for LL0
+    LL0=torch.sum(torch.log(1/(mask_tr.sum(dim=1)))).item()
     LLB=torch.sum(chosen_logprobs).item()
     rhosq=1-(LLB/LL0)
     print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
     if testVal:
-        LL0_ts=torch.sum(torch.log(1/(1+mask_ts.sum(dim=1)))).item()
+        LL0_ts=torch.sum(torch.log(1/(mask_ts.sum(dim=1)))).item()
         LLB_ts=torch.sum(chosen_logprobs_ts).item()
         rhosq_ts=1-(LLB_ts/LL0_ts)
         print(f' ******* Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
@@ -368,12 +376,17 @@ def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
     plt.title(f'Losses (nnodes: {nnodes} lrate: {lrate:.3f}, l2:{l2Gamma:.3f})')
     plt.legend()
     plt.show()
-    print(attrsUsed)
-    print(model.beta.cpu().detach().numpy())
+    resdf=pd.DataFrame(model.beta.cpu().detach().numpy(),columns=attrsUsed)
+    resdf['PS']=resdf['PS']/100
+    resdf.index=np.array('Class')+(resdf.index+1).astype(str)
+    membershipinspect=pd.DataFrame(latent_classes.detach().cpu().numpy())
+    membershipinspectval=membershipinspect.loc[:,0].max()-membershipinspect.loc[:,0].min()
+    print(f' ******* Class 1 Assignment Probabilities Range: {membershipinspectval:.4f}*****')
+    print(' ******* MRS with respect to in-vehicle time (IVT) ********')
+    print(resdf.div(resdf['iv'],axis=0))
     '''
     # Output
     outputs,membership = model(seg, nums,mask)
-    outputs=outputs*mask
     outfin=torch.gather(outputs, 1, y.unsqueeze(1)).squeeze(1)
     outfin=outputs.detach().cpu().numpy()
     membership=membership.detach().cpu().numpy()
