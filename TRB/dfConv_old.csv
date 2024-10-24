@@ -79,28 +79,28 @@ version,step,field,orilevel,newlevel
 2016,pre,egress,Dial-a-Ride,drive
 2022,post,summer,Fall/Spring,0
 2022,post,summer,Summer,1
-2022,post,typeO,Your HOME / place I am staying,Home
-2022,post,typeO,College / University (students only),Ed
-2022,post,typeO,Work,W
-2022,post,typeO,Friend's house/Social visit/religious/community activity,So
-2022,post,typeO,"Dining out / getting coffee, or take-out",O
-2022,post,typeO,Sporting or Special Event,O
-2022,post,typeO,Shopping / errand / other appointment (e.g. haircut),Sh
-2022,post,typeO,Airport (passengers only),O
-2022,post,typeO,"Medical appointment (doctor, clinic, hospital) non-work",O
-2022,post,typeO,School (K-12) (students only),Ed
-2022,post,typeO,Other,O
-2022,post,typeD,Work,W
-2022,post,typeD,College / University (students only),Ed
-2022,post,typeD,Your HOME / place I am staying,Home
-2022,post,typeD,Sporting or Special Event,O
-2022,post,typeD,Friend's house/Social visit/religious/community activity,So
-2022,post,typeD,Shopping / errand / other appointment (e.g. haircut),Sh
-2022,post,typeD,"Dining out / getting coffee, or take-out",O
-2022,post,typeD,Airport (passengers only),O
-2022,post,typeD,"Medical appointment (doctor, clinic, hospital) non-work",O
-2022,post,typeD,School (K-12) (students only),Ed
-2022,post,typeD,Other,O
+2022,post,purO,Your HOME / place I am staying,Home
+2022,post,purO,College / University (students only),Ed
+2022,post,purO,Work,W
+2022,post,purO,Friend's house/Social visit/religious/community activity,So
+2022,post,purO,"Dining out / getting coffee, or take-out",O
+2022,post,purO,Sporting or Special Event,O
+2022,post,purO,Shopping / errand / other appointment (e.g. haircut),Sh
+2022,post,purO,Airport (passengers only),O
+2022,post,purO,"Medical appointment (doctor, clinic, hospital) non-work",O
+2022,post,purO,School (K-12) (students only),Ed
+2022,post,purO,Other,O
+2022,post,purD,Work,W
+2022,post,purD,College / University (students only),Ed
+2022,post,purD,Your HOME / place I am staying,Home
+2022,post,purD,Sporting or Special Event,O
+2022,post,purD,Friend's house/Social visit/religious/community activity,So
+2022,post,purD,Shopping / errand / other appointment (e.g. haircut),Sh
+2022,post,purD,"Dining out / getting coffee, or take-out",O
+2022,post,purD,Airport (passengers only),O
+2022,post,purD,"Medical appointment (doctor, clinic, hospital) non-work",O
+2022,post,purD,School (K-12) (students only),Ed
+2022,post,purD,Other,O
 2022,post,plan,Regular known trip,known
 2022,post,plan,Just went to stop / station,couldhave
 2022,post,plan,Used a printed or posted schedule,nonweb
@@ -162,28 +162,28 @@ version,step,field,orilevel,newlevel
 2022,post,engflu,Less than well,0
 2022,post,engflu,Not at all,0
 2022,post,engflu,Refused/No Answer,1
-2022,post,age,65 - 74,65to74
-2022,post,age,18 - 24,18to24
-2022,post,age,25 - 34,25to34
-2022,post,age,35 - 44,35to44
-2022,post,age,45 - 54,45to54
-2022,post,age,55 - 64,55to64
-2022,post,age,75 and over,More75
-2022,post,age,Prefer not to answer,Refused
-2022,post,age,16 - 17,16to17
-2022,post,age,45427,Under15
-2022,post,age,15-May,Under15
-2022,post,age,Under 5,Under15
-2022,post,income,"$60,000 - $79,999",60K80K
-2022,post,income,"$100,000 - $149,999",100K150K
-2022,post,income,Refused/No Answer,Refused
-2022,post,income,"$35,000 - $59,999",35K60K
-2022,post,income,"Less than $15,000",Less15K
-2022,post,income,"$25,000 - $34,999",25K35K
-2022,post,income,"$15,000 - $24,999",15K25K
-2022,post,income,"$80,000 - $99,999",80K100K
-2022,post,income,"$200,000 or more",More200K
-2022,post,income,"$150,000 - $199,999",150K200K
+2022,post,age,65 - 74,70
+2022,post,age,18 - 24,21
+2022,post,age,25 - 34,30
+2022,post,age,35 - 44,40
+2022,post,age,45 - 54,50
+2022,post,age,55 - 64,60
+2022,post,age,75 and over,85
+2022,post,age,Prefer not to answer,30
+2022,post,age,16 - 17,16.5
+2022,post,age,45427,10
+2022,post,age,15-May,10
+2022,post,age,Under 5,2.5
+2022,post,income,"$60,000 - $79,999",70
+2022,post,income,"$100,000 - $149,999",125
+2022,post,income,Refused/No Answer,0
+2022,post,income,"$35,000 - $59,999",47.5
+2022,post,income,"Less than $15,000",7.5
+2022,post,income,"$25,000 - $34,999",30
+2022,post,income,"$15,000 - $24,999",20
+2022,post,income,"$80,000 - $99,999",90
+2022,post,income,"$200,000 or more",300
+2022,post,income,"$150,000 - $199,999",175
 2022,post,disability,No,0
 2022,post,disability,Prefer not to say,0
 2022,post,disability,Yes,1
@@ -205,145 +205,3 @@ version,step,field,orilevel,newlevel
 2022,post,oppotime,7:00 pm - 8:00 pm,19
 2022,post,oppotime,8:00 pm - 9:00 pm,20
 2022,post,oppotime,After 9:00 pm,21
-2022,post,hhsize,One (1),1
-2022,post,hhsize,Four (4),4Plus
-2022,post,hhsize,Three (3),3
-2022,post,hhsize,Five (5),4Plus
-2022,post,hhsize,Two (2),2
-2022,post,hhsize,Seven (7),4Plus
-2022,post,hhsize,Ten or More (10+),4Plus
-2022,post,hhsize,Six (6),4Plus
-2022,post,hhsize,Nine (9),4Plus
-2022,post,hhsize,Eight (8),4Plus
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,
-,,,,

@@ -32,13 +32,13 @@ print(device)
 attrsUsed=['tway','PS','wk','nwk','wt','nTrans','iv'] #the last two should be iv and ntrans for desired model eval
 
 doPreprocess=False
+
 #%% Data Preprocessing
-def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=None,strict=True):
+def InputProcessing(surFile,pathFile,convFile=None,purpose=False,imputeCols=[],tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=None,strict=True):
     '''for debugging
-    surFile='survey'
-    pathFile='paths'
-    ver=2022
-    convFile='dfConv'
+    surFile='survey2022.csv'
+    pathFile='paths2022.csv'
+    convFile='dfConv.csv'
     imputeCols=['duration']
     tivdomcut=0.2
     minxferpen=3
@@ -46,30 +46,35 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minx
     propcut=1.5
     strict=True
     depcut=15
+    purpose=False
     '''
-    dfSurveyRaw=pd.read_csv(surFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
-    dfConversion=pd.read_csv(convFile+r'.csv')
-    #ver=int(pd.to_datetime(dfSurveyRaw.survey_date).dt.year.median())
+    ver=int(os.path.splitext(surFile)[0][-4:]) #either 2016 or 2022
+    dfSurveyRaw=pd.read_csv(surFile,low_memory=False, encoding='ISO 8859-1')
     match ver:
         case 2016:
             pass
         case 2022:
             dfSurvey=dfSurveyRaw.loc[:,['id','collection_type','date_type','origin_place_type','destin_place_type',
-                                     'plan_for_trip','realtime_info','do_you_drive', 'used_veh_trip',
+                                     'plan_for_trip','realtime_info','do_you_drive', 'used_veh_trip','hh_size',
                                      'hh_member_travel','origin_transport','destin_transport','trip_in_oppo_dir',
                                      'oppo_dir_trip_time','gender_male', 'gender_female','race_white','resident_visitor',
                                      'work_location','student_status','english_ability', 'your_age','income', 'have_disability']]
-            dfSurvey.columns=['id','summer','dayofweek','purO','purD','plan','realtime','candrive','cdhvusdveh',
+            print(f'Deleted cols: {np.setdiff1d(dfSurveyRaw.columns,dfSurvey.columns)}')
+            dfSurvey.columns=['id','summer','dayofweek','typeO','typeD','plan','realtime','candrive','cdhvusdveh','hhsize',
                               'HHcomp','access','egress','oppo','oppotime','male','female','white','visitor','worktype','stu',
                               'engflu','age','income','disability']
-    #use keygen to generate dfConv.csv
-    keygen=dict()
-    for col in dfSurvey.columns[1:]:
-        elems=dfSurvey.loc[:,col].unique()
-        if len(elems)<50:
-            keygen[col]=elems.tolist()
-    keygen=pd.Series(keygen, name='orilevel').rename_axis('field').explode().reset_index()
-    keygen.to_clipboard(index=False,header=False)
+    try: # To refactor some categorical variables from the survey format to model-able
+        dfConversion=pd.read_csv(convFile)
+        dfConversion=dfConversion.loc[(dfConversion.version==ver) & (dfConversion.step=='post'),:]
+    except NameError: #use keygen to generate dfConv.csv
+        keygen=dict()
+        for col in dfSurvey.columns[1:]:
+            elems=dfSurvey.loc[:,col].unique()
+            if len(elems)<50:
+                keygen[col]=elems.tolist()
+        keygen=pd.Series(keygen, name='orilevel').rename_axis('field').explode().reset_index()
+        keygen.to_clipboard(index=False,header=False)
+        raise Exception('Variable factors conversion file (dfConv.csv) not found: use clipboard to generate this and run again')
     #how to deal with missing values?
     dfSurvey.fillna(value={'plan':'web','HHcomp':'0','worktype':'unemp','engflu':'1'},inplace=True)
     #refactoring some categorical variables from the survey format to model-able
@@ -83,17 +88,20 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minx
         except ValueError:
             pass
     #some variables are need to be defined using multiple survey responses
+    removecols=['candrive','cdhvusdveh','oppotime','sid','realDep'] #predefine cols to be dropped after newvars gen
     dfSurvey['choicerider']='dependent'
     dfSurvey.loc[dfSurvey.candrive=='Yes','choicerider']='potentially'
     dfSurvey.loc[dfSurvey.cdhvusdveh=='Yes','choicerider']='choicerider'
     dfSurvey['nonbinary']=1
     dfSurvey.loc[(dfSurvey['male']+dfSurvey['female'])>0,'nonbinary']=0
-    dfSurvey['purpose']='HB'
-    dfSurvey.loc[(dfSurvey['purO']!='Home') & (dfSurvey['purD']!='Home'),'purpose']='NHB'
-    dfSurvey.loc[dfSurvey.purpose=='HB','purpose']+=(dfSurvey.loc[dfSurvey.purpose=='HB','purO']+dfSurvey.loc[dfSurvey.purpose=='HB','purD']).str.replace('Home','')#.str[0]
-    dfSurvey.loc[dfSurvey.purpose=='HB','purpose']='HBO' #there is one instance whose O and D are both Home
+    if purpose: #if you want to use HTS-like travel purpose, and not using origin/destination types
+        dfSurvey['purpose']='HB'
+        dfSurvey.loc[(dfSurvey['typeO']!='Home') & (dfSurvey['typeD']!='Home'),'purpose']='NHB'
+        dfSurvey.loc[dfSurvey.purpose=='HB','purpose']+=(dfSurvey.loc[dfSurvey.purpose=='HB','typeO']+dfSurvey.loc[dfSurvey.purpose=='HB','typeD']).str.replace('Home','')#.str[0]
+        dfSurvey.loc[dfSurvey.purpose=='HB','purpose']='HBO' #there is only one instance whose O and D are both Home
+        removecols+=['typeO','typeD']
     #move on to the path preprocessing; paths retrieved from the repository SchBasedSPwithTE_Pandas
-    dfPathRaw=pd.read_csv(pathFile+str(ver)+r'.csv',low_memory=False, encoding='ISO 8859-1')
+    dfPathRaw=pd.read_csv(pathFile,low_memory=False, encoding='ISO 8859-1')
     print('Among '+str(len(dfPathRaw.sid.unique()))+' survey respondents examined,')
     dfPath=dfPathRaw.drop(columns=['detail','nodes','snap','elapsed','TE','hr']).dropna(subset='routes')
     print(str(len(dfPath.sid.unique()))+' respondents have at least one path identified from V-SBSP')
@@ -104,7 +112,7 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minx
     dfPath['cost']=dfPath.tt+minxferpen*dfPath.nTrans #tiebreaker
     dfPath['tway']=0
     dfPath.loc[dfPath.tiv>dfPath.iv*tivdomcut,'tway']=1
-    ##After TRBAM 2025 Submission
+    ## Added After TRBAM 2025 Submission: discard 'pairing' and allow up to 5 alts per agent
     dfPath=dfPath.loc[dfPath.iv>0,:]
     dfPath=dfPath.loc[dfPath.sid.isin(dfPath.loc[dfPath.match==1,'sid'].unique())]
     if depcut is not None:#Departure time restriction
@@ -116,7 +124,6 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minx
     dfPath['matchxf']=dfPath.groupby('sid')['nTrans'].transform(lambda x: x[dfPath['match'] == 1].values[0])
     dfPath['matchprop']=dfPath.matchiv/dfPath.matchtt
     dfPath=dfPath.loc[~( (dfPath.tt<=dfPath.matchtt)&(dfPath.iv/dfPath.tt<dfPath.matchprop) ),:]
-    #Discard 'pairing' used in TRBAM
     dfPath['spcost']=dfPath.groupby(['sid'])['cost'].transform('min')
     dfPath['compDiff']=dfPath.cost-dfPath.spcost
     dfPath['compProp']=dfPath.cost/dfPath.spcost
@@ -130,13 +137,15 @@ def InputProcessing(surFile,pathFile,ver,convFile,imputeCols=[],tivdomcut=0,minx
     print(f'{len(dfPath.sid.unique())} choice sets generated ({100*(1-len(pathfilter2)/len(pathfilter)):.2f}% filtered)')
     #Imputing activity duration
     dfSurvey=pd.merge(dfSurvey,dfPathRaw.loc[dfPathRaw.match==1,['sid','realDep']],left_on='id',right_on='sid')
+    dfSurvey['hr']=dfSurvey.realDep//60
     dfSurvey['duration']=dfSurvey.oppotime-dfSurvey.realDep/60
-    dfSurvey=dfSurvey.drop_duplicates('id').drop(columns=['purO','purD','candrive','cdhvusdveh','oppotime','sid','realDep']).reset_index(drop=True)
-    #print(dfSurvey.isnull().sum())
-    catcols=['dayofweek','plan','access','egress','worktype','stu','choicerider','purpose']
+    dfSurvey=dfSurvey.drop_duplicates('id').drop(columns=removecols).reset_index(drop=True)
+    #one-hot-encoding
+    catcols=['dayofweek','plan','access','egress','worktype','stu','choicerider','purpose','typeO','typeD','age','income','hhsize']
+    catcols=np.intersect1d(catcols,dfSurvey.columns)
     enc=OneHotEncoder(sparse_output=False)
-    dfOnehot=pd.DataFrame( enc.fit_transform(dfSurvey[catcols]),columns=enc.get_feature_names_out())
-    dfSurvey=pd.concat([dfSurvey.drop(columns=catcols),dfOnehot],axis=1,ignore_index=False)
+    dfOnehot=pd.DataFrame(enc.fit_transform(dfSurvey[catcols]),columns=enc.get_feature_names_out())
+    dfSurvey=pd.concat([dfSurvey.drop(columns=catcols,errors='ignore'),dfOnehot],axis=1,ignore_index=False)
     if len(imputeCols)>0: #to be updated
         pass #KNNImputer(n_neighbors=20,weights='distance').fit_transform(dfSurvey.drop(columns='id'))
     else:
@@ -224,8 +233,9 @@ def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[],makediff=False):
     dfIn=pd.merge(dfXD,dfS,on='id')
     return seg, nums, choices, validAlt,dfIn
 
+#doPreprocess=True
 if doPreprocess:
-    dfSurvey, dfPath= InputProcessing('survey','paths',2022,'dfConv',imputeCols=['duration'],
+    dfSurvey, dfPath= InputProcessing('survey2022.csv','paths2022.csv','dfConv.csv',imputeCols=['duration'],purpose=False,
                                       tivdomcut=0,minxferpen=1,abscut=15,propcut=2,depcut=45,strict=True)
     dfPath=attachPS(dfPath)
     dfPath['alt'] = dfPath.groupby('id').cumcount()
@@ -238,11 +248,11 @@ else:
 
 seg, nums, y, mask, dfIn=genTensors(dfPP,
                                                      pathcols=attrsUsed,
-                                                     dropcols=['duration'],
-                                                     stdcols=['age', 'income', 'duration'],
+                                                     dropcols=['duration','hr'],
+                                                     stdcols=[],
                                                      makediff=False)
 
-
+diffused=dfPP.alt.max()==nums.shape[1]
 
 
 
@@ -309,9 +319,9 @@ def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
     testVal=True
     nclass=2
     nnodes=128
-    nepoch=300
+    nepoch=500
     lrate=0.03
-    l2Gamma=0.02
+    l2Gamma=0.05
     negBetaNum=0
     max_norm=5
     '''
@@ -358,12 +368,12 @@ def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
     # Summary; torch.sum(torch.log(1/(1+mask_tr.sum(dim=1)))).item() when diff used for LL0
-    LL0=torch.sum(torch.log(1/(mask_tr.sum(dim=1)))).item()
+    LL0=torch.sum(torch.log(1/(int(diffused)+mask_tr.sum(dim=1)))).item()
     LLB=torch.sum(chosen_logprobs).item()
     rhosq=1-(LLB/LL0)
     print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
     if testVal:
-        LL0_ts=torch.sum(torch.log(1/(mask_ts.sum(dim=1)))).item()
+        LL0_ts=torch.sum(torch.log(1/(int(diffused)+mask_ts.sum(dim=1)))).item()
         LLB_ts=torch.sum(chosen_logprobs_ts).item()
         rhosq_ts=1-(LLB_ts/LL0_ts)
         print(f' ******* Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
