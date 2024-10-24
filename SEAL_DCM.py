@@ -190,12 +190,12 @@ def attachPS(df):
     print('Path Size Correction Term has been calculated')
     return df
 
-def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[],makediff=False):
+def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[],dimDown=False):
     '''
     pathcols=attrsUsed
-    dropcols=['duration']
-    stdcols=['age', 'income', 'duration']
-    makediff=True
+    dropcols=['duration','hr']
+    stdcols=[]
+    dimDown=True
     '''
     #setup
     PathSurvCut=np.where(dfPP.columns=='alt')[0][0]
@@ -211,18 +211,16 @@ def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[],makediff=False):
         dfS.update(stdized)
     dfS=dfS.drop(columns=np.append(['alt'],dropcols)).set_index('id')
     seg=torch.tensor(dfS.to_numpy(),dtype=torch.float32).to(device)
-    #numerical attributes; only difference matters and alt0 is never a chosen path by dfPath.sort_values(['id','match']) per definition
+    #numerical attributes; try to achieve diff-based MNL estimation by restructuring
     dfX=dfPP.iloc[:,:PathSurvCut+1].copy()
     dfX=dfX.loc[:,np.append(['id','alt','match'],pathcols)]
-    if makediff: #alt0 should be preprocessed as nonmatching path; we did in dfPath.sort_values(['id','match'])
-        dfX2=dfX[dfX.alt==0].drop(columns=['alt','match']) 
-        dfXD=pd.merge(dfX, dfX2, on='id', suffixes=('_main', '_aux'))
-        for attr in pathcols:  #calc difference
-            dfXD[attr] = dfXD[f'{attr}_main'] - dfXD[f'{attr}_aux']
+    dfX2=dfX[dfX.alt==0].drop(columns=['alt','match']) 
+    dfXD=pd.merge(dfX, dfX2, on='id', suffixes=('_main', '_aux'))
+    for attr in pathcols:  #calc difference
+        dfXD[attr] = dfXD[f'{attr}_main'] - dfXD[f'{attr}_aux']
+    if dimDown: #alt0 should be preprocessed as nonmatching path; we did in dfPath.sort_values(['id','match'])
         dfXD=dfXD.loc[dfXD.alt!=0,dfX.columns]
         maxalt=maxalt-1 #dim downed
-    else: #not making difference matrix (numalt dimension kept)
-        dfXD=dfX.copy()
     grouped=dfXD.groupby('id')
     numlist=grouped[pathcols].apply(lambda x: x.values.tolist()).tolist()
     nums=torch.nn.utils.rnn.pad_sequence([torch.tensor(a,dtype=torch.float32) for a in numlist], batch_first=True, padding_value=0).to(device)
@@ -230,7 +228,7 @@ def genTensors(dfPP,pathcols=attrsUsed,dropcols=[],stdcols=[],makediff=False):
     choices=torch.tensor(choices, dtype=torch.long).to(device)
     validAlt = grouped['alt'].apply(lambda x: [1] * len(x) + [0] * (maxalt+1 - len(x)), include_groups=False).tolist()
     validAlt = torch.tensor(validAlt, dtype=torch.float32).to(device)
-    dfIn=pd.merge(dfXD,dfS,on='id')
+    dfIn=pd.merge(dfXD,dfS,on='id').drop(columns=dfXD.columns[dfXD.columns.str.contains('_main|_aux')])
     return seg, nums, choices, validAlt,dfIn
 
 #doPreprocess=True
@@ -250,9 +248,9 @@ seg, nums, y, mask, dfIn=genTensors(dfPP,
                                                      pathcols=attrsUsed,
                                                      dropcols=['duration','hr'],
                                                      stdcols=[],
-                                                     makediff=False)
+                                                     dimDown=False)
 
-diffused=dfPP.alt.max()==nums.shape[1]
+dimDowned=dfPP.alt.max()==nums.shape[1]
 
 
 
@@ -368,12 +366,12 @@ def train_model(seg,nums,y,testVal=False,negBetaNum=0,nclass=2,
         if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{nepoch}], Loss: {loss.item():.4f}')
     # Summary; torch.sum(torch.log(1/(1+mask_tr.sum(dim=1)))).item() when diff used for LL0
-    LL0=torch.sum(torch.log(1/(int(diffused)+mask_tr.sum(dim=1)))).item()
+    LL0=torch.sum(torch.log(1/(int(dimDowned)+mask_tr.sum(dim=1)))).item()
     LLB=torch.sum(chosen_logprobs).item()
     rhosq=1-(LLB/LL0)
     print(f' ******* Training McFadden rho-sq value: {rhosq:.4f} *******')
     if testVal:
-        LL0_ts=torch.sum(torch.log(1/(int(diffused)+mask_ts.sum(dim=1)))).item()
+        LL0_ts=torch.sum(torch.log(1/(int(dimDowned)+mask_ts.sum(dim=1)))).item()
         LLB_ts=torch.sum(chosen_logprobs_ts).item()
         rhosq_ts=1-(LLB_ts/LL0_ts)
         print(f' ******* Test or validation McFadden rhosq: {rhosq_ts:.4f} *******')
